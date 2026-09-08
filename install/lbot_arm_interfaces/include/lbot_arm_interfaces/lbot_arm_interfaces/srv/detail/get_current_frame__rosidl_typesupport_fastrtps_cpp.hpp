@@ -1,0 +1,1 @@
+/home/dawntildusk/lbot_ws/build/lbot_arm_interfaces/rosidl_typesupport_fastrtps_cpp/lbot_arm_interfaces/srv/detail/get_current_frame__rosidl_typesupport_fastrtps_cpp.hpp

@@ -1,0 +1,1 @@
+ament_cmake_symlink_install_targets("TARGET_FILES" "/home/dawntildusk/lbot_ws/build/lbot_arm_interfaces/rosidl_generator_py/lbot_arm_interfaces/lbot_arm_interfaces_s__rosidl_typesupport_introspection_c.so" "TARGETS" "lbot_arm_interfaces_s__rosidl_typesupport_introspection_c" "DESTINATION" "lib/python3.12/site-packages/lbot_arm_interfaces")

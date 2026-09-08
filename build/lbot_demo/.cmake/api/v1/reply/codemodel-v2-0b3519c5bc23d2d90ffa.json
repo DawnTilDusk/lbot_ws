@@ -1,0 +1,205 @@
+{
+	"configurations" : 
+	[
+		{
+			"directories" : 
+			[
+				{
+					"build" : ".",
+					"hasInstallRule" : true,
+					"jsonFile" : "directory-.-3896b21a52e8bae80465.json",
+					"minimumCMakeVersion" : 
+					{
+						"string" : "3.15"
+					},
+					"projectIndex" : 0,
+					"source" : ".",
+					"targetIndexes" : 
+					[
+						0,
+						1,
+						2,
+						3,
+						4,
+						5,
+						6,
+						7,
+						8,
+						9,
+						10,
+						11,
+						12,
+						13,
+						14,
+						15,
+						16
+					]
+				}
+			],
+			"name" : "",
+			"projects" : 
+			[
+				{
+					"directoryIndexes" : 
+					[
+						0
+					],
+					"name" : "lbot_demo",
+					"targetIndexes" : 
+					[
+						0,
+						1,
+						2,
+						3,
+						4,
+						5,
+						6,
+						7,
+						8,
+						9,
+						10,
+						11,
+						12,
+						13,
+						14,
+						15,
+						16
+					]
+				}
+			],
+			"targets" : 
+			[
+				{
+					"directoryIndex" : 0,
+					"id" : "demo_emergency_enable::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-demo_emergency_enable-266c138895fb74df9bbb.json",
+					"name" : "demo_emergency_enable",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "demo_fk::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-demo_fk-4fcac0da99d551359a1a.json",
+					"name" : "demo_fk",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "demo_hand_l10_control::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-demo_hand_l10_control-e35dddfab966696a242b.json",
+					"name" : "demo_hand_l10_control",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "demo_hand_l6_control::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-demo_hand_l6_control-00e8ca6a6228f7d2b657.json",
+					"name" : "demo_hand_l6_control",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "demo_ik::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-demo_ik-f21750085b529e4e3f0f.json",
+					"name" : "demo_ik",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "demo_lkls_i1_movej::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-demo_lkls_i1_movej-4cf87fd63edcbc1abc2e.json",
+					"name" : "demo_lkls_i1_movej",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "demo_lkls_i1_movejp::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-demo_lkls_i1_movejp-413ad373fc5e2f338a41.json",
+					"name" : "demo_lkls_i1_movejp",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "demo_lkls_i1_movel::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-demo_lkls_i1_movel-66cc524b59390fb3eae6.json",
+					"name" : "demo_lkls_i1_movel",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "demo_lkls_movej::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-demo_lkls_movej-d5f8cf815146050fd8b3.json",
+					"name" : "demo_lkls_movej",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "demo_lkls_movejp::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-demo_lkls_movejp-bf0111c033d572096b3e.json",
+					"name" : "demo_lkls_movejp",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "demo_lkls_movel::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-demo_lkls_movel-df5f20a9b349f3a63b83.json",
+					"name" : "demo_lkls_movel",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "demo_lkrs_movej::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-demo_lkrs_movej-8c707c548d28e029dbca.json",
+					"name" : "demo_lkrs_movej",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "demo_lkrs_movejp::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-demo_lkrs_movejp-703dc28934ecf226049d.json",
+					"name" : "demo_lkrs_movejp",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "demo_lkrs_movel::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-demo_lkrs_movel-ac5dbce7b8b6dc7d86be.json",
+					"name" : "demo_lkrs_movel",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "demo_tool_frame::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-demo_tool_frame-578b244d71b77ae66393.json",
+					"name" : "demo_tool_frame",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "lbot_demo_uninstall::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-lbot_demo_uninstall-bf568bec1d59f0b1bfbe.json",
+					"name" : "lbot_demo_uninstall",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "uninstall::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-uninstall-2026989788994e7ebfe5.json",
+					"name" : "uninstall",
+					"projectIndex" : 0
+				}
+			]
+		}
+	],
+	"kind" : "codemodel",
+	"paths" : 
+	{
+		"build" : "/home/dawntildusk/lbot_ws/build/lbot_demo",
+		"source" : "/home/dawntildusk/lbot_ws/src/lbot_demo"
+	},
+	"version" : 
+	{
+		"major" : 2,
+		"minor" : 6
+	}
+}

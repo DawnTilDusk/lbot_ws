@@ -1,0 +1,82 @@
+[0.006s] Invoking command in '/home/dawntildusk/lbot_ws/build/lbot_driver': AMENT_PREFIX_PATH=/home/dawntildusk/lbot_ws/install/lbot_arm_interfaces:${AMENT_PREFIX_PATH} CMAKE_PREFIX_PATH=/home/dawntildusk/lbot_ws/install/lbot_arm_interfaces:/opt/ros/jazzy/opt/gz_math_vendor:/opt/ros/jazzy/opt/gz_utils_vendor:/opt/ros/jazzy/opt/gz_cmake_vendor:/opt/ros/jazzy DEBUGINFOD_URLS=https://debuginfod.ubuntu.com LD_LIBRARY_PATH=/home/dawntildusk/lbot_ws/install/lbot_arm_interfaces/lib:${LD_LIBRARY_PATH} PYTHONPATH=/home/dawntildusk/lbot_ws/install/lbot_arm_interfaces/lib/python3.12/site-packages:${PYTHONPATH} /usr/bin/cmake /home/dawntildusk/lbot_ws/src/lbot_driver -DPython3_EXECUTABLE=/usr/bin/python3 -DAMENT_CMAKE_SYMLINK_INSTALL=1 -DCMAKE_INSTALL_PREFIX=/home/dawntildusk/lbot_ws/install/lbot_driver
+[0.046s] -- The C compiler identification is GNU 13.3.0
+[0.077s] -- The CXX compiler identification is GNU 13.3.0
+[0.087s] -- Detecting C compiler ABI info
+[0.144s] -- Detecting C compiler ABI info - done
+[0.151s] -- Check for working C compiler: /usr/bin/cc - skipped
+[0.151s] -- Detecting C compile features
+[0.151s] -- Detecting C compile features - done
+[0.156s] -- Detecting CXX compiler ABI info
+[0.218s] -- Detecting CXX compiler ABI info - done
+[0.226s] -- Check for working CXX compiler: /usr/bin/c++ - skipped
+[0.226s] -- Detecting CXX compile features
+[0.226s] -- Detecting CXX compile features - done
+[0.228s] -- Found ament_cmake: 2.5.6 (/opt/ros/jazzy/share/ament_cmake/cmake)
+[0.314s] -- Found Python3: /usr/bin/python3 (found version "3.12.3") found components: Interpreter 
+[0.358s] -- Override CMake install command with custom implementation using symlinks instead of copying resources
+[0.372s] -- Found rclcpp: 28.1.21 (/opt/ros/jazzy/share/rclcpp/cmake)
+[0.394s] -- Found rosidl_generator_c: 4.6.9 (/opt/ros/jazzy/share/rosidl_generator_c/cmake)
+[0.401s] -- Found rosidl_generator_cpp: 4.6.9 (/opt/ros/jazzy/share/rosidl_generator_cpp/cmake)
+[0.409s] -- Using all available rosidl_typesupport_c: rosidl_typesupport_fastrtps_c;rosidl_typesupport_introspection_c
+[0.419s] -- Using all available rosidl_typesupport_cpp: rosidl_typesupport_fastrtps_cpp;rosidl_typesupport_introspection_cpp
+[0.461s] -- Found rmw_implementation_cmake: 7.3.3 (/opt/ros/jazzy/share/rmw_implementation_cmake/cmake)
+[0.463s] -- Found rmw_fastrtps_cpp: 8.4.4 (/opt/ros/jazzy/share/rmw_fastrtps_cpp/cmake)
+[0.512s] -- Found OpenSSL: /usr/lib/x86_64-linux-gnu/libcrypto.so (found version "3.0.13")  
+[0.525s] -- Found FastRTPS: /opt/ros/jazzy/include (Required is at least version "2.13") 
+[0.542s] -- Using RMW implementation 'rmw_fastrtps_cpp' as default
+[0.589s] -- Found std_msgs: 5.3.8 (/opt/ros/jazzy/share/std_msgs/cmake)
+[0.597s] -- Found std_srvs: 5.3.8 (/opt/ros/jazzy/share/std_srvs/cmake)
+[0.608s] -- Found sensor_msgs: 5.3.8 (/opt/ros/jazzy/share/sensor_msgs/cmake)
+[0.632s] -- Found tf2: 0.36.21 (/opt/ros/jazzy/share/tf2/cmake)
+[0.635s] -- Found tf2_geometry_msgs: 0.36.21 (/opt/ros/jazzy/share/tf2_geometry_msgs/cmake)
+[0.642s] -- Found eigen3_cmake_module: 0.3.1 (/opt/ros/jazzy/share/eigen3_cmake_module/cmake)
+[0.643s] -- Found Eigen3: TRUE (found version "3.4.0") 
+[0.643s] -- Ensuring Eigen3 include directory is part of orocos-kdl CMake target
+[0.718s] -- Found lbot_arm_interfaces: 0.0.0 (/home/dawntildusk/lbot_ws/install/lbot_arm_interfaces/share/lbot_arm_interfaces/cmake)
+[0.797s] -- Configuring done (0.8s)
+[0.806s] -- Generating done (0.0s)
+[0.808s] -- Build files have been written to: /home/dawntildusk/lbot_ws/build/lbot_driver
+[0.815s] Invoked command in '/home/dawntildusk/lbot_ws/build/lbot_driver' returned '0': AMENT_PREFIX_PATH=/home/dawntildusk/lbot_ws/install/lbot_arm_interfaces:${AMENT_PREFIX_PATH} CMAKE_PREFIX_PATH=/home/dawntildusk/lbot_ws/install/lbot_arm_interfaces:/opt/ros/jazzy/opt/gz_math_vendor:/opt/ros/jazzy/opt/gz_utils_vendor:/opt/ros/jazzy/opt/gz_cmake_vendor:/opt/ros/jazzy DEBUGINFOD_URLS=https://debuginfod.ubuntu.com LD_LIBRARY_PATH=/home/dawntildusk/lbot_ws/install/lbot_arm_interfaces/lib:${LD_LIBRARY_PATH} PYTHONPATH=/home/dawntildusk/lbot_ws/install/lbot_arm_interfaces/lib/python3.12/site-packages:${PYTHONPATH} /usr/bin/cmake /home/dawntildusk/lbot_ws/src/lbot_driver -DPython3_EXECUTABLE=/usr/bin/python3 -DAMENT_CMAKE_SYMLINK_INSTALL=1 -DCMAKE_INSTALL_PREFIX=/home/dawntildusk/lbot_ws/install/lbot_driver
+[0.816s] Invoking command in '/home/dawntildusk/lbot_ws/build/lbot_driver': AMENT_PREFIX_PATH=/home/dawntildusk/lbot_ws/install/lbot_arm_interfaces:${AMENT_PREFIX_PATH} CMAKE_PREFIX_PATH=/home/dawntildusk/lbot_ws/install/lbot_arm_interfaces:/opt/ros/jazzy/opt/gz_math_vendor:/opt/ros/jazzy/opt/gz_utils_vendor:/opt/ros/jazzy/opt/gz_cmake_vendor:/opt/ros/jazzy DEBUGINFOD_URLS=https://debuginfod.ubuntu.com LD_LIBRARY_PATH=/home/dawntildusk/lbot_ws/install/lbot_arm_interfaces/lib:${LD_LIBRARY_PATH} PYTHONPATH=/home/dawntildusk/lbot_ws/install/lbot_arm_interfaces/lib/python3.12/site-packages:${PYTHONPATH} /usr/bin/cmake --build /home/dawntildusk/lbot_ws/build/lbot_driver -- -j24 -l24
+[0.850s] [ 50%] [32mBuilding CXX object CMakeFiles/lbot_driver.dir/src/lbot_driver.cpp.o[0m
+[13.337s] [100%] [32m[1mLinking CXX executable lbot_driver[0m
+[13.771s] [100%] Built target lbot_driver
+[13.779s] Invoked command in '/home/dawntildusk/lbot_ws/build/lbot_driver' returned '0': AMENT_PREFIX_PATH=/home/dawntildusk/lbot_ws/install/lbot_arm_interfaces:${AMENT_PREFIX_PATH} CMAKE_PREFIX_PATH=/home/dawntildusk/lbot_ws/install/lbot_arm_interfaces:/opt/ros/jazzy/opt/gz_math_vendor:/opt/ros/jazzy/opt/gz_utils_vendor:/opt/ros/jazzy/opt/gz_cmake_vendor:/opt/ros/jazzy DEBUGINFOD_URLS=https://debuginfod.ubuntu.com LD_LIBRARY_PATH=/home/dawntildusk/lbot_ws/install/lbot_arm_interfaces/lib:${LD_LIBRARY_PATH} PYTHONPATH=/home/dawntildusk/lbot_ws/install/lbot_arm_interfaces/lib/python3.12/site-packages:${PYTHONPATH} /usr/bin/cmake --build /home/dawntildusk/lbot_ws/build/lbot_driver -- -j24 -l24
+[13.779s] Invoking command in '/home/dawntildusk/lbot_ws/build/lbot_driver': AMENT_PREFIX_PATH=/home/dawntildusk/lbot_ws/install/lbot_arm_interfaces:${AMENT_PREFIX_PATH} CMAKE_PREFIX_PATH=/home/dawntildusk/lbot_ws/install/lbot_arm_interfaces:/opt/ros/jazzy/opt/gz_math_vendor:/opt/ros/jazzy/opt/gz_utils_vendor:/opt/ros/jazzy/opt/gz_cmake_vendor:/opt/ros/jazzy DEBUGINFOD_URLS=https://debuginfod.ubuntu.com LD_LIBRARY_PATH=/home/dawntildusk/lbot_ws/install/lbot_arm_interfaces/lib:${LD_LIBRARY_PATH} PYTHONPATH=/home/dawntildusk/lbot_ws/install/lbot_arm_interfaces/lib/python3.12/site-packages:${PYTHONPATH} /usr/bin/cmake --install /home/dawntildusk/lbot_ws/build/lbot_driver
+[13.786s] -- Install configuration: ""
+[13.786s] -- Execute custom install script
+[13.786s] -- Symlinking: /home/dawntildusk/lbot_ws/install/lbot_driver/lib/lbot_driver/lbot_driver
+[13.793s] -- Symlinking: /home/dawntildusk/lbot_ws/install/lbot_driver/share/lbot_driver/launch/lbot_start_driver.launch.py
+[13.800s] -- Symlinking: /home/dawntildusk/lbot_ws/install/lbot_driver/share/lbot_driver/config/lbot_config.yaml
+[13.811s] -- Symlinking: /home/dawntildusk/lbot_ws/install/lbot_driver/lib/lib_install.sh
+[13.820s] -- Symlinking: /home/dawntildusk/lbot_ws/install/lbot_driver/lib/liblbot_api_cpp.so
+[13.827s] -- Symlinking: /home/dawntildusk/lbot_ws/install/lbot_driver/lib/liblbot_api_cpp.so.1
+[13.837s] -- Symlinking: /home/dawntildusk/lbot_ws/install/lbot_driver/lib/liblbot_api_cpp.so.1.0.0
+[13.848s] -- Symlinking: /home/dawntildusk/lbot_ws/install/lbot_driver/lib/linux_arm64/liblbot_api.so
+[13.858s] -- Symlinking: /home/dawntildusk/lbot_ws/install/lbot_driver/lib/linux_arm64/liblbot_api.so.1
+[13.867s] -- Symlinking: /home/dawntildusk/lbot_ws/install/lbot_driver/lib/linux_arm64/liblbot_api.so.1.0.5
+[13.876s] -- Symlinking: /home/dawntildusk/lbot_ws/install/lbot_driver/lib/linux_arm64/liblbot_api_cpp.so
+[13.886s] -- Symlinking: /home/dawntildusk/lbot_ws/install/lbot_driver/lib/linux_arm64/liblbot_api_cpp.so.1
+[13.897s] -- Symlinking: /home/dawntildusk/lbot_ws/install/lbot_driver/lib/linux_arm64/liblbot_api_cpp.so.1.0.5
+[13.907s] -- Symlinking: /home/dawntildusk/lbot_ws/install/lbot_driver/lib/linux_x64/liblbot_api.so
+[13.913s] -- Symlinking: /home/dawntildusk/lbot_ws/install/lbot_driver/lib/linux_x64/liblbot_api.so.1
+[13.921s] -- Symlinking: /home/dawntildusk/lbot_ws/install/lbot_driver/lib/linux_x64/liblbot_api.so.1.0.5
+[13.929s] -- Symlinking: /home/dawntildusk/lbot_ws/install/lbot_driver/lib/linux_x64/liblbot_api_cpp.so
+[13.940s] -- Symlinking: /home/dawntildusk/lbot_ws/install/lbot_driver/lib/linux_x64/liblbot_api_cpp.so.1
+[13.949s] -- Symlinking: /home/dawntildusk/lbot_ws/install/lbot_driver/lib/linux_x64/liblbot_api_cpp.so.1.0.5
+[13.961s] -- Symlinking: /home/dawntildusk/lbot_ws/install/lbot_driver/share/ament_index/resource_index/package_run_dependencies/lbot_driver
+[13.969s] -- Symlinking: /home/dawntildusk/lbot_ws/install/lbot_driver/share/ament_index/resource_index/parent_prefix_path/lbot_driver
+[13.979s] -- Symlinking: /home/dawntildusk/lbot_ws/install/lbot_driver/share/lbot_driver/environment/ament_prefix_path.sh
+[13.989s] -- Symlinking: /home/dawntildusk/lbot_ws/install/lbot_driver/share/lbot_driver/environment/ament_prefix_path.dsv
+[13.996s] -- Symlinking: /home/dawntildusk/lbot_ws/install/lbot_driver/share/lbot_driver/environment/path.sh
+[14.004s] -- Symlinking: /home/dawntildusk/lbot_ws/install/lbot_driver/share/lbot_driver/environment/path.dsv
+[14.010s] -- Symlinking: /home/dawntildusk/lbot_ws/install/lbot_driver/share/lbot_driver/local_setup.bash
+[14.014s] -- Symlinking: /home/dawntildusk/lbot_ws/install/lbot_driver/share/lbot_driver/local_setup.sh
+[14.019s] -- Symlinking: /home/dawntildusk/lbot_ws/install/lbot_driver/share/lbot_driver/local_setup.zsh
+[14.026s] -- Symlinking: /home/dawntildusk/lbot_ws/install/lbot_driver/share/lbot_driver/local_setup.dsv
+[14.032s] -- Symlinking: /home/dawntildusk/lbot_ws/install/lbot_driver/share/lbot_driver/package.dsv
+[14.037s] -- Symlinking: /home/dawntildusk/lbot_ws/install/lbot_driver/share/ament_index/resource_index/packages/lbot_driver
+[14.043s] -- Symlinking: /home/dawntildusk/lbot_ws/install/lbot_driver/share/lbot_driver/cmake/lbot_driverConfig.cmake
+[14.047s] -- Symlinking: /home/dawntildusk/lbot_ws/install/lbot_driver/share/lbot_driver/cmake/lbot_driverConfig-version.cmake
+[14.053s] -- Symlinking: /home/dawntildusk/lbot_ws/install/lbot_driver/share/lbot_driver/package.xml
+[14.061s] Invoked command in '/home/dawntildusk/lbot_ws/build/lbot_driver' returned '0': AMENT_PREFIX_PATH=/home/dawntildusk/lbot_ws/install/lbot_arm_interfaces:${AMENT_PREFIX_PATH} CMAKE_PREFIX_PATH=/home/dawntildusk/lbot_ws/install/lbot_arm_interfaces:/opt/ros/jazzy/opt/gz_math_vendor:/opt/ros/jazzy/opt/gz_utils_vendor:/opt/ros/jazzy/opt/gz_cmake_vendor:/opt/ros/jazzy DEBUGINFOD_URLS=https://debuginfod.ubuntu.com LD_LIBRARY_PATH=/home/dawntildusk/lbot_ws/install/lbot_arm_interfaces/lib:${LD_LIBRARY_PATH} PYTHONPATH=/home/dawntildusk/lbot_ws/install/lbot_arm_interfaces/lib/python3.12/site-packages:${PYTHONPATH} /usr/bin/cmake --install /home/dawntildusk/lbot_ws/build/lbot_driver

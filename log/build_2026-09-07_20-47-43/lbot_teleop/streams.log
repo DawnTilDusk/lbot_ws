@@ -1,0 +1,78 @@
+[0.006s] Invoking command in '/home/dawntildusk/lbot_ws/build/lbot_teleop': AMENT_PREFIX_PATH=/home/dawntildusk/lbot_ws/install/lbot_arm_interfaces:${AMENT_PREFIX_PATH} CMAKE_PREFIX_PATH=/home/dawntildusk/lbot_ws/install/lbot_arm_interfaces:/opt/ros/jazzy/opt/gz_math_vendor:/opt/ros/jazzy/opt/gz_utils_vendor:/opt/ros/jazzy/opt/gz_cmake_vendor:/opt/ros/jazzy DEBUGINFOD_URLS=https://debuginfod.ubuntu.com LD_LIBRARY_PATH=/home/dawntildusk/lbot_ws/install/lbot_arm_interfaces/lib:${LD_LIBRARY_PATH} PYTHONPATH=/home/dawntildusk/lbot_ws/install/lbot_arm_interfaces/lib/python3.12/site-packages:${PYTHONPATH} /usr/bin/cmake /home/dawntildusk/lbot_ws/src/lbot_teleop -DPython3_EXECUTABLE=/usr/bin/python3 -DAMENT_CMAKE_SYMLINK_INSTALL=1 -DCMAKE_INSTALL_PREFIX=/home/dawntildusk/lbot_ws/install/lbot_teleop
+[0.047s] -- The C compiler identification is GNU 13.3.0
+[0.084s] -- The CXX compiler identification is GNU 13.3.0
+[0.094s] -- Detecting C compiler ABI info
+[0.151s] -- Detecting C compiler ABI info - done
+[0.157s] -- Check for working C compiler: /usr/bin/cc - skipped
+[0.157s] -- Detecting C compile features
+[0.157s] -- Detecting C compile features - done
+[0.163s] -- Detecting CXX compiler ABI info
+[0.227s] -- Detecting CXX compiler ABI info - done
+[0.232s] -- Check for working CXX compiler: /usr/bin/c++ - skipped
+[0.232s] -- Detecting CXX compile features
+[0.233s] -- Detecting CXX compile features - done
+[0.234s] -- Found ament_cmake: 2.5.6 (/opt/ros/jazzy/share/ament_cmake/cmake)
+[0.321s] -- Found Python3: /usr/bin/python3 (found version "3.12.3") found components: Interpreter 
+[0.363s] -- Override CMake install command with custom implementation using symlinks instead of copying resources
+[0.377s] -- Found rclcpp: 28.1.21 (/opt/ros/jazzy/share/rclcpp/cmake)
+[0.398s] -- Found rosidl_generator_c: 4.6.9 (/opt/ros/jazzy/share/rosidl_generator_c/cmake)
+[0.407s] -- Found rosidl_generator_cpp: 4.6.9 (/opt/ros/jazzy/share/rosidl_generator_cpp/cmake)
+[0.418s] -- Using all available rosidl_typesupport_c: rosidl_typesupport_fastrtps_c;rosidl_typesupport_introspection_c
+[0.427s] -- Using all available rosidl_typesupport_cpp: rosidl_typesupport_fastrtps_cpp;rosidl_typesupport_introspection_cpp
+[0.470s] -- Found rmw_implementation_cmake: 7.3.3 (/opt/ros/jazzy/share/rmw_implementation_cmake/cmake)
+[0.471s] -- Found rmw_fastrtps_cpp: 8.4.4 (/opt/ros/jazzy/share/rmw_fastrtps_cpp/cmake)
+[0.520s] -- Found OpenSSL: /usr/lib/x86_64-linux-gnu/libcrypto.so (found version "3.0.13")  
+[0.532s] -- Found FastRTPS: /opt/ros/jazzy/include (Required is at least version "2.13") 
+[0.551s] -- Using RMW implementation 'rmw_fastrtps_cpp' as default
+[0.597s] -- Found std_msgs: 5.3.8 (/opt/ros/jazzy/share/std_msgs/cmake)
+[0.606s] -- Found std_srvs: 5.3.8 (/opt/ros/jazzy/share/std_srvs/cmake)
+[0.616s] -- Found sensor_msgs: 5.3.8 (/opt/ros/jazzy/share/sensor_msgs/cmake)
+[0.641s] -- Found tf2: 0.36.21 (/opt/ros/jazzy/share/tf2/cmake)
+[0.644s] -- Found tf2_geometry_msgs: 0.36.21 (/opt/ros/jazzy/share/tf2_geometry_msgs/cmake)
+[0.651s] -- Found eigen3_cmake_module: 0.3.1 (/opt/ros/jazzy/share/eigen3_cmake_module/cmake)
+[0.652s] -- Found Eigen3: TRUE (found version "3.4.0") 
+[0.652s] -- Ensuring Eigen3 include directory is part of orocos-kdl CMake target
+[0.727s] -- Found lbot_arm_interfaces: 0.0.0 (/home/dawntildusk/lbot_ws/install/lbot_arm_interfaces/share/lbot_arm_interfaces/cmake)
+[0.753s] -- Found ament_lint_auto: 0.17.5 (/opt/ros/jazzy/share/ament_lint_auto/cmake)
+[0.812s] -- Added test 'cppcheck' to perform static code analysis on C / C++ code
+[0.812s] -- Configured cppcheck include dirs: /home/dawntildusk/lbot_ws/src/lbot_teleop/include;/home/dawntildusk/lbot_ws/src/lbot_teleop/include/lbot_teleop
+[0.812s] -- Configured cppcheck exclude dirs and/or files: 
+[0.812s] -- Added test 'flake8' to check Python code syntax and style conventions
+[0.812s] -- Configured 'flake8' exclude dirs and/or files: 
+[0.813s] -- Added test 'lint_cmake' to check CMake code style
+[0.813s] -- Added test 'pep257' to check Python code against some of the docstring style conventions in PEP 257
+[0.813s] -- Added test 'uncrustify' to check C / C++ code style
+[0.813s] -- Configured uncrustify additional arguments: 
+[0.814s] -- Added test 'xmllint' to check XML markup files
+[0.814s] -- Configuring done (0.8s)
+[0.821s] -- Generating done (0.0s)
+[0.823s] -- Build files have been written to: /home/dawntildusk/lbot_ws/build/lbot_teleop
+[0.829s] Invoked command in '/home/dawntildusk/lbot_ws/build/lbot_teleop' returned '0': AMENT_PREFIX_PATH=/home/dawntildusk/lbot_ws/install/lbot_arm_interfaces:${AMENT_PREFIX_PATH} CMAKE_PREFIX_PATH=/home/dawntildusk/lbot_ws/install/lbot_arm_interfaces:/opt/ros/jazzy/opt/gz_math_vendor:/opt/ros/jazzy/opt/gz_utils_vendor:/opt/ros/jazzy/opt/gz_cmake_vendor:/opt/ros/jazzy DEBUGINFOD_URLS=https://debuginfod.ubuntu.com LD_LIBRARY_PATH=/home/dawntildusk/lbot_ws/install/lbot_arm_interfaces/lib:${LD_LIBRARY_PATH} PYTHONPATH=/home/dawntildusk/lbot_ws/install/lbot_arm_interfaces/lib/python3.12/site-packages:${PYTHONPATH} /usr/bin/cmake /home/dawntildusk/lbot_ws/src/lbot_teleop -DPython3_EXECUTABLE=/usr/bin/python3 -DAMENT_CMAKE_SYMLINK_INSTALL=1 -DCMAKE_INSTALL_PREFIX=/home/dawntildusk/lbot_ws/install/lbot_teleop
+[0.829s] Invoking command in '/home/dawntildusk/lbot_ws/build/lbot_teleop': AMENT_PREFIX_PATH=/home/dawntildusk/lbot_ws/install/lbot_arm_interfaces:${AMENT_PREFIX_PATH} CMAKE_PREFIX_PATH=/home/dawntildusk/lbot_ws/install/lbot_arm_interfaces:/opt/ros/jazzy/opt/gz_math_vendor:/opt/ros/jazzy/opt/gz_utils_vendor:/opt/ros/jazzy/opt/gz_cmake_vendor:/opt/ros/jazzy DEBUGINFOD_URLS=https://debuginfod.ubuntu.com LD_LIBRARY_PATH=/home/dawntildusk/lbot_ws/install/lbot_arm_interfaces/lib:${LD_LIBRARY_PATH} PYTHONPATH=/home/dawntildusk/lbot_ws/install/lbot_arm_interfaces/lib/python3.12/site-packages:${PYTHONPATH} /usr/bin/cmake --build /home/dawntildusk/lbot_ws/build/lbot_teleop -- -j24 -l24
+[0.865s] [ 25%] [32mBuilding CXX object CMakeFiles/demo_teleop.dir/src/canbus.cpp.o[0m
+[0.866s] [ 50%] [32mBuilding CXX object CMakeFiles/demo_teleop.dir/src/lbot_teleoperation.cpp.o[0m
+[0.866s] [ 75%] [32mBuilding CXX object CMakeFiles/demo_teleop.dir/src/teleopmasterarm.cpp.o[0m
+[5.796s] [100%] [32m[1mLinking CXX executable demo_teleop[0m
+[5.938s] [100%] Built target demo_teleop
+[5.947s] Invoked command in '/home/dawntildusk/lbot_ws/build/lbot_teleop' returned '0': AMENT_PREFIX_PATH=/home/dawntildusk/lbot_ws/install/lbot_arm_interfaces:${AMENT_PREFIX_PATH} CMAKE_PREFIX_PATH=/home/dawntildusk/lbot_ws/install/lbot_arm_interfaces:/opt/ros/jazzy/opt/gz_math_vendor:/opt/ros/jazzy/opt/gz_utils_vendor:/opt/ros/jazzy/opt/gz_cmake_vendor:/opt/ros/jazzy DEBUGINFOD_URLS=https://debuginfod.ubuntu.com LD_LIBRARY_PATH=/home/dawntildusk/lbot_ws/install/lbot_arm_interfaces/lib:${LD_LIBRARY_PATH} PYTHONPATH=/home/dawntildusk/lbot_ws/install/lbot_arm_interfaces/lib/python3.12/site-packages:${PYTHONPATH} /usr/bin/cmake --build /home/dawntildusk/lbot_ws/build/lbot_teleop -- -j24 -l24
+[5.948s] Invoking command in '/home/dawntildusk/lbot_ws/build/lbot_teleop': AMENT_PREFIX_PATH=/home/dawntildusk/lbot_ws/install/lbot_arm_interfaces:${AMENT_PREFIX_PATH} CMAKE_PREFIX_PATH=/home/dawntildusk/lbot_ws/install/lbot_arm_interfaces:/opt/ros/jazzy/opt/gz_math_vendor:/opt/ros/jazzy/opt/gz_utils_vendor:/opt/ros/jazzy/opt/gz_cmake_vendor:/opt/ros/jazzy DEBUGINFOD_URLS=https://debuginfod.ubuntu.com LD_LIBRARY_PATH=/home/dawntildusk/lbot_ws/install/lbot_arm_interfaces/lib:${LD_LIBRARY_PATH} PYTHONPATH=/home/dawntildusk/lbot_ws/install/lbot_arm_interfaces/lib/python3.12/site-packages:${PYTHONPATH} /usr/bin/cmake --install /home/dawntildusk/lbot_ws/build/lbot_teleop
+[5.955s] -- Install configuration: ""
+[5.955s] -- Execute custom install script
+[5.955s] -- Symlinking: /home/dawntildusk/lbot_ws/install/lbot_teleop/lib/lbot_teleop/demo_teleop
+[5.960s] -- Symlinking: /home/dawntildusk/lbot_ws/install/lbot_teleop/share/lbot_teleop/launch/lbot_start_teleop.launch.py
+[5.966s] -- Symlinking: /home/dawntildusk/lbot_ws/install/lbot_teleop/share/ament_index/resource_index/package_run_dependencies/lbot_teleop
+[5.973s] -- Symlinking: /home/dawntildusk/lbot_ws/install/lbot_teleop/share/ament_index/resource_index/parent_prefix_path/lbot_teleop
+[5.978s] -- Symlinking: /home/dawntildusk/lbot_ws/install/lbot_teleop/share/lbot_teleop/environment/ament_prefix_path.sh
+[5.985s] -- Symlinking: /home/dawntildusk/lbot_ws/install/lbot_teleop/share/lbot_teleop/environment/ament_prefix_path.dsv
+[5.992s] -- Symlinking: /home/dawntildusk/lbot_ws/install/lbot_teleop/share/lbot_teleop/environment/path.sh
+[5.998s] -- Symlinking: /home/dawntildusk/lbot_ws/install/lbot_teleop/share/lbot_teleop/environment/path.dsv
+[6.002s] -- Symlinking: /home/dawntildusk/lbot_ws/install/lbot_teleop/share/lbot_teleop/local_setup.bash
+[6.008s] -- Symlinking: /home/dawntildusk/lbot_ws/install/lbot_teleop/share/lbot_teleop/local_setup.sh
+[6.013s] -- Symlinking: /home/dawntildusk/lbot_ws/install/lbot_teleop/share/lbot_teleop/local_setup.zsh
+[6.020s] -- Symlinking: /home/dawntildusk/lbot_ws/install/lbot_teleop/share/lbot_teleop/local_setup.dsv
+[6.026s] -- Symlinking: /home/dawntildusk/lbot_ws/install/lbot_teleop/share/lbot_teleop/package.dsv
+[6.032s] -- Symlinking: /home/dawntildusk/lbot_ws/install/lbot_teleop/share/ament_index/resource_index/packages/lbot_teleop
+[6.039s] -- Symlinking: /home/dawntildusk/lbot_ws/install/lbot_teleop/share/lbot_teleop/cmake/lbot_teleopConfig.cmake
+[6.046s] -- Symlinking: /home/dawntildusk/lbot_ws/install/lbot_teleop/share/lbot_teleop/cmake/lbot_teleopConfig-version.cmake
+[6.051s] -- Symlinking: /home/dawntildusk/lbot_ws/install/lbot_teleop/share/lbot_teleop/package.xml
+[6.058s] Invoked command in '/home/dawntildusk/lbot_ws/build/lbot_teleop' returned '0': AMENT_PREFIX_PATH=/home/dawntildusk/lbot_ws/install/lbot_arm_interfaces:${AMENT_PREFIX_PATH} CMAKE_PREFIX_PATH=/home/dawntildusk/lbot_ws/install/lbot_arm_interfaces:/opt/ros/jazzy/opt/gz_math_vendor:/opt/ros/jazzy/opt/gz_utils_vendor:/opt/ros/jazzy/opt/gz_cmake_vendor:/opt/ros/jazzy DEBUGINFOD_URLS=https://debuginfod.ubuntu.com LD_LIBRARY_PATH=/home/dawntildusk/lbot_ws/install/lbot_arm_interfaces/lib:${LD_LIBRARY_PATH} PYTHONPATH=/home/dawntildusk/lbot_ws/install/lbot_arm_interfaces/lib/python3.12/site-packages:${PYTHONPATH} /usr/bin/cmake --install /home/dawntildusk/lbot_ws/build/lbot_teleop
