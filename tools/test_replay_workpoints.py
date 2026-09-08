@@ -72,23 +72,25 @@ class ReplayTests(unittest.TestCase):
         repeated=[event('sample', i*.1, 0.) for i in range(50)]
         self.assertEqual(len(compact_route(repeated,'right_arm',.002,.2)),2)
 
-    def run_mock(self, offset=0., success=True):
+    def run_mock(self, offset=0., success=True, approach=False, other_offset=0., update=True):
         p=self.make_plan(start='start')
         feedback=copy.deepcopy(p['route'][0])
         feedback['errors']=[]
         feedback['states']['right_arm/joint_states']['message']['position']=[offset]*7
+        feedback['states']['left_arm/joint_states']['message']['position']=[other_offset]*7
         calls=[]
         class Client:
             def wait_for_service(self, **kw):return True
             def call_async(self, req):
                 calls.append(req)
-                feedback['states']['right_arm/joint_states']['message']['position']=req.joints
+                if update:
+                    feedback['states']['right_arm/joint_states']['message']['position']=req.joints
                 return NS(done=lambda:True, result=lambda:NS(success=success))
         node=NS(cache={}, create_client=lambda *a:Client(), destroy_node=lambda:None)
         modules={'rclpy':NS(init=lambda:None,ok=lambda:True,shutdown=lambda:None,spin_once=lambda *a,**k:None),
                  'lbot_arm_interfaces':NS(), 'lbot_arm_interfaces.srv':NS(MoveJ=NS(Request=lambda:NS())),
                  'record_workpoints':NS(Recorder=lambda ns:node,snapshot=lambda *a:feedback)}
-        args=NS(start_tolerance=.05,max_step=.2,speed=.15,accel=.15,timeout=1.,reached_tolerance=.03)
+        args=NS(move_to_start=approach, approach_speed=.15, approach_accel=.15, start_tolerance=.05,max_step=.2,speed=.15,accel=.15,timeout=1.,reached_tolerance=.03)
         with patch.dict(sys.modules,modules):
             try:execute(p,args)
             except RuntimeError as e:return calls,str(e)
@@ -98,6 +100,32 @@ class ReplayTests(unittest.TestCase):
         calls,error=self.run_mock(offset=1.)
         self.assertEqual(calls,[])
         self.assertIn('起点',error)
+
+    def test_approach_precedes_replay(self):
+        calls,error=self.run_mock(offset=1.,approach=True)
+        self.assertIsNone(error)
+        self.assertEqual([c.joints[0] for c in calls],[0.,.01,.02,.025])
+        self.assertEqual(calls[0].speed,.15)
+
+    def test_failed_approach_does_not_replay(self):
+        calls,error=self.run_mock(offset=1.,approach=True,success=False)
+        self.assertEqual(len(calls),1)
+        self.assertIn('失败',error)
+
+    def test_other_arm_mismatch_prevents_approach(self):
+        calls,error=self.run_mock(offset=1.,approach=True,other_offset=1.)
+        self.assertEqual(calls,[])
+        self.assertIn('另一只臂',error)
+
+    def test_approach_flag_at_start_adds_no_motion(self):
+        calls,error=self.run_mock(approach=True)
+        self.assertIsNone(error)
+        self.assertEqual(len(calls),3)
+
+    def test_approach_requires_measured_arrival(self):
+        calls,error=self.run_mock(offset=1.,approach=True,update=False)
+        self.assertEqual(len(calls),1)
+        self.assertIn('未到目标',error)
 
     def test_service_failure_stops_following_requests(self):
         calls,error=self.run_mock(success=False)

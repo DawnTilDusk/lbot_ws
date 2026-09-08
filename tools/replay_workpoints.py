@@ -140,30 +140,12 @@ def execute(p, args):
                 raise RuntimeError('另一只臂偏离记录姿态，停止继续下发')
             return q
 
-        deadline = time.monotonic() + 5.
-        while time.monotonic() < deadline:
-            rclpy.spin_once(node, timeout_sec=.02)
-            if snapshot(node.cache, time.monotonic(), .5, .15)['valid']:
-                break
-        current = state()
-        origin = joints(p['route'][0], p['arm'])[0]
-        if distance(current, origin) > args.start_tolerance:
-            raise RuntimeError(f'当前姿态与轨迹起点相差 {distance(current, origin):.3f} rad，超过 {args.start_tolerance:.3f} rad；不会自动移动到起点')
-        previous = origin
-        for index, event in enumerate(p['route'][1:], 1):
-            rclpy.spin_once(node, timeout_sec=.02)
-            current = state()
-            if distance(current, previous) > args.start_tolerance:
-                raise RuntimeError('执行前反馈偏离上一步目标')
-            q = joints(event, p['arm'])[0]
-            if distance(q, current) > args.max_step + args.start_tolerance:
-                raise RuntimeError('当前状态到目标的跳变过大')
+        def move(q, speed, accel, tolerance):
             req = MoveJ.Request()
             req.joints = [float(v) for v in q]
-            req.speed = args.speed
-            req.acce = args.accel
+            req.speed = speed
+            req.acce = accel
             req.block = True
-            print(f'下发 {index}/{len(p["route"])-1}', flush=True)
             future = client.call_async(req)
             deadline = time.monotonic() + args.timeout
             while not future.done():
@@ -177,10 +159,36 @@ def execute(p, args):
             deadline = time.monotonic() + 2.
             while True:
                 rclpy.spin_once(node, timeout_sec=.02)
-                if distance(state(), q) <= args.reached_tolerance:
+                if distance(state(), q) <= tolerance:
                     break
                 if time.monotonic() > deadline:
                     raise RuntimeError('服务成功，但反馈未到目标容差内')
+
+        deadline = time.monotonic() + 5.
+        while time.monotonic() < deadline:
+            rclpy.spin_once(node, timeout_sec=.02)
+            if snapshot(node.cache, time.monotonic(), .5, .15)['valid']:
+                break
+        current = state()
+        origin = joints(p['route'][0], p['arm'])[0]
+        if distance(current, origin) > args.start_tolerance:
+            if not args.move_to_start:
+                raise RuntimeError(f'当前姿态与轨迹起点相差 {distance(current, origin):.3f} rad，超过 {args.start_tolerance:.3f} rad；需要 --move-to-start 才会移动到起点')
+            print(f'先移动到起点：最大关节差 {distance(current, origin):.3f} rad，速度 {args.approach_speed} rad/s。', flush=True)
+            move(origin, args.approach_speed, args.approach_accel,
+                 min(args.start_tolerance, args.reached_tolerance))
+            print('已确认到达起点，开始轨迹回放。', flush=True)
+        previous = origin
+        for index, event in enumerate(p['route'][1:], 1):
+            rclpy.spin_once(node, timeout_sec=.02)
+            current = state()
+            if distance(current, previous) > args.start_tolerance:
+                raise RuntimeError('执行前反馈偏离上一步目标')
+            q = joints(event, p['arm'])[0]
+            if distance(q, current) > args.max_step + args.start_tolerance:
+                raise RuntimeError('当前状态到目标的跳变过大')
+            print(f'下发 {index}/{len(p["route"])-1}', flush=True)
+            move(q, args.speed, args.accel, args.reached_tolerance)
             previous = q
         print(f'已沿记录关节点到达 {p["target"]} ({p["label"]})。')
     finally:
@@ -204,6 +212,9 @@ def main():
     parser.add_argument('--from', dest='start', help='起点 point_id 或唯一标签；默认首条有效采样')
     parser.add_argument('--arm', choices=('left', 'right'), required=True)
     parser.add_argument('--execute', action='store_true', help='实际发送运动；默认只预览')
+    parser.add_argument('--move-to-start', action='store_true', help='执行时先以 MoveJ 低速接近起点；需确认额外路径无碰撞')
+    parser.add_argument('--approach-speed', type=positive, default=.15, help='接近起点速度 rad/s，最大 0.3')
+    parser.add_argument('--approach-accel', type=positive, default=.15, help='接近起点加速度 rad/s²，最大 0.3')
     parser.add_argument('--speed', type=positive, default=.3, help='rad/s，最大 0.5')
     parser.add_argument('--accel', type=positive, default=.5, help='rad/s^2，最大 0.5')
     parser.add_argument('--start-tolerance', type=positive, default=.05)
@@ -215,6 +226,8 @@ def main():
     args = parser.parse_args()
     if not math.isfinite(args.min_step) or not 0 <= args.min_step <= min(.01, args.max_step):
         parser.error('--min-step 必须在 0 到 min(0.01, max-step) 之间')
+    if args.approach_speed > .3 or args.approach_accel > .3:
+        parser.error('接近起点速度和加速度限制在 0.3 以内')
     if args.speed > .5 or args.accel > .5:
         parser.error('本脚本将速度和加速度限制在 0.5 以内')
     try:
@@ -227,7 +240,8 @@ def main():
         print(f'路径状态数：{len(route)}；记录时长：{route[-1]["elapsed_seconds"]-route[0]["elapsed_seconds"]:.2f}s；忽略启动无效采样：{p["skipped"]}')
         print('起点关节(rad)：', joints(route[0], p['arm'])[0])
         print('终点关节(rad)：', joints(route[-1], p['arm'])[0])
-        print('逐点 MoveJ 回放，不复现原始时序；没有碰撞规划。不会自动使能或自动回到起点。')
+        print('逐点 MoveJ 回放，不复现原始时序；没有碰撞规划。不会自动使能。')
+        print('起点修正：启用；执行时从实时姿态以 MoveJ 接近，非记录路径，没有碰撞规划。' if args.move_to_start else '起点修正：关闭；起点不匹配时拒绝运动。')
         if args.execute:
             print('执行模式。Ctrl+C/异常只停止后续下发，不保证撤销在途运动；紧急情况使用实体急停。', flush=True)
             execute(p, args)
