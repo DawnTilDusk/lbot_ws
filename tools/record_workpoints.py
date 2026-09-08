@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """Read-only dual-arm waypoint and trajectory recorder. See WORKPOINTS.md."""
 import argparse
+import codecs
+import shlex
+import termios
+import tty
 import copy
 import json
 import math
@@ -78,56 +82,32 @@ class Session:
         directory.mkdir(parents=True, exist_ok=False)
         self.directory = directory
         self.file = (directory / 'events.jsonl').open('x', encoding='utf-8')
-        self.samples = 0
-        self.points = 0  # Number of named records.
+        self.points = 0
         self.records = 0
-        self.mode = 'idle'
-        self.pending = None
-        self.invalid_samples = 0
-        self.emit({'type': 'metadata', **metadata}, durable=True)
+        self.mode = 'collecting'
+        self.point_ids = []
+        self.emit({'type': 'metadata', **metadata})
 
-    def emit(self, event, durable=False):
+    def emit(self, event):
         self.file.write(json.dumps(clean_json(event), ensure_ascii=False, allow_nan=False) + '\n')
         self.file.flush()
-        if durable:
-            os.fsync(self.file.fileno())
+        os.fsync(self.file.fileno())
 
-    def begin(self, state, elapsed):
-        if self.mode != 'idle' or not state['valid']:
+    def mark(self, state, elapsed):
+        if self.mode != 'collecting' or not state['valid']:
             return False
-        self.records += 1
-        self.record_id = f'record_{self.records:03d}'
-        self.start_id = self.record_id + '_start'
-        self.segment_start = self.samples + 1
-        self.invalid_samples = 0
-        self.emit({'type': 'waypoint', 'point_id': self.start_id,
-                   'label': self.start_id, 'role': 'start',
-                   'record_id': self.record_id, 'elapsed_seconds': elapsed,
-                   **copy.deepcopy(state)}, durable=True)
-        self.mode = 'recording'
+        point_id = f'point_{self.points+1:03d}'
+        self.emit({'type': 'waypoint', 'point_id': point_id,
+                   'label': point_id, 'elapsed_seconds': elapsed,
+                   **copy.deepcopy(state)})
+        self.point_ids.append(point_id)
+        self.points += 1
         return True
 
-    def sample(self, state, elapsed):
-        if self.mode != 'recording':
-            return
-        self.samples += 1
-        self.invalid_samples += int(not state['valid'])
-        self.emit({'type': 'sample', 'record_id': self.record_id,
-                   'sample_id': self.samples, 'elapsed_seconds': elapsed, **state})
-
-    def stop(self, state, elapsed):
-        if self.mode != 'recording':
+    def stop(self):
+        if self.mode != 'collecting' or not self.point_ids:
             return False
-        self.pending = {'type': 'waypoint', 'point_id': self.record_id + '_end',
-                        'role': 'end', 'record_id': self.record_id,
-                        'elapsed_seconds': elapsed,
-                        'segment': {'from_point_id': self.start_id,
-                                    'first_sample_id': self.segment_start if self.samples >= self.segment_start else None,
-                                    'last_sample_id': self.samples if self.samples >= self.segment_start else None,
-                                    'invalid_samples': self.invalid_samples},
-                        **copy.deepcopy(state)}
-        # Persist the stop snapshot before naming; later feedback must not change it.
-        self.emit({**self.pending, 'type': 'record_stop'}, durable=True)
+        self.emit({'type': 'sequence_stop', 'point_ids': self.point_ids[:]})
         self.mode = 'naming'
         return True
 
@@ -135,20 +115,47 @@ class Session:
         label = label.strip()
         if self.mode != 'naming' or not label:
             return None
+        self.records += 1
         full_label = f'{label}_{self.records:03d}'
-        self.emit({**self.pending, 'label': full_label, 'base_label': label}, durable=True)
-        self.points += 1
-        self.mode = 'idle'
-        self.pending = None
+        self.emit({'type': 'sequence', 'sequence_id': f'sequence_{self.records:03d}',
+                   'label': full_label, 'base_label': label,
+                   'point_ids': self.point_ids[:]})
+        self.point_ids.clear()
+        self.mode = 'collecting'
         return full_label
 
     def close(self):
         if not self.file.closed:
-            self.emit({'type': 'end', 'named_records': self.points,
-                       'started_records': self.records, 'samples': self.samples,
-                       'unfinished_record_id': self.record_id if self.mode != 'idle' else None,
-                       'unfinished_status': self.mode if self.mode != 'idle' else None}, durable=True)
+            self.emit({'type': 'end', 'named_sequences': self.records,
+                       'points': self.points, 'unfinished_point_ids': self.point_ids[:],
+                       'unfinished_status': self.mode if self.point_ids else None})
             self.file.close()
+
+
+def replay_commands(path, label, arm):
+    script = Path(__file__).resolve().with_name('replay_workpoints.py')
+    args = ['/usr/bin/python3', str(script), str(path.resolve()),
+            '--arm', arm, '--to', label, '--move-to-start']
+    return shlex.join(args), shlex.join(args + ['--execute'])
+
+
+class Console:
+    """Immediate q/Enter capture; restore terminal even on failure or Ctrl+C."""
+    def __enter__(self):
+        self.fd = sys.stdin.fileno()
+        self.settings = termios.tcgetattr(self.fd)
+        tty.setcbreak(self.fd)
+        self.decoder = codecs.getincrementaldecoder('utf-8')('replace')
+        return self
+
+    def poll(self):
+        if select.select([self.fd], [], [], 0)[0]:
+            data = os.read(self.fd, 4096)
+            return self.decoder.decode(data) if data else '\x04'
+        return ''
+
+    def __exit__(self, *exc):
+        termios.tcsetattr(self.fd, termios.TCSADRAIN, self.settings)
 
 
 class Recorder(Node):
@@ -176,7 +183,7 @@ def positive(value):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--namespace', default='/robot1')
-    parser.add_argument('--rate', type=positive, default=10.0, help='trajectory samples per second')
+    parser.add_argument('--arm', choices=('left', 'right'), default='right', help='生成回放命令所选机械臂；始终记录双臂反馈')
     parser.add_argument('--max-age', type=positive, default=0.5)
     parser.add_argument('--max-skew', type=positive, default=0.15)
     parser.add_argument('--output', type=Path, default=Path('recordings'))
@@ -186,8 +193,8 @@ def main():
     namespace = '/' + args.namespace.strip('/') if args.namespace.strip('/') else ''
     directory = args.output.expanduser().resolve() / datetime.now().strftime('%Y%m%d_%H%M%S_%f')
     session = Session(directory, {
-        'schema_version': 2, 'created_utc': datetime.now(timezone.utc).isoformat(),
-        'namespace': namespace, 'rate_hz': args.rate,
+        'schema_version': 3, 'recording_mode': 'manual_waypoints', 'created_utc': datetime.now(timezone.utc).isoformat(),
+        'namespace': namespace, 'replay_arm': args.arm,
         'max_age_seconds': args.max_age, 'max_reception_skew_seconds': args.max_skew,
         'topics': [f'{namespace}/{key}' for key in KEYS],
         'units': {'joint_position': 'rad', 'pose_position': 'm', 'orientation': 'quaternion_xyzw'},
@@ -202,45 +209,54 @@ def main():
         initialized = True
         node = Recorder(namespace)
         start = time.monotonic()
-        next_sample = start
         last_valid = None
+        name_buffer = ''
         print(f'记录文件：{directory / "events.jsonl"}', flush=True)
-        print('仅记录，不使能/掉使能、不发送运动。回车开始 → 回车停止 → 输入名称回车保存；可连续记录，:q 退出。', flush=True)
-        while rclpy.ok():
-            rclpy.spin_once(node, timeout_sec=min(0.02, 1 / args.rate))
-            now = time.monotonic()
-            state = snapshot(node.cache, now, args.max_age, args.max_skew)
-            if state['valid'] != last_valid:
-                print('状态就绪。等待开始时按回车；记录中按回车停止。' if state['valid'] else
-                      '状态不可用：' + '; '.join(state['errors']), flush=True)
-                last_valid = state['valid']
-            if now >= next_sample:
-                session.sample(state, now - start)
-                next_sample = now + 1 / args.rate
-            if select.select([sys.stdin], [], [], 0)[0]:
-                line = sys.stdin.readline()
-                if not line or line.strip() == ':q':
+        print(f'每按回车记录一个点；直接按 q 停止并命名；Ctrl+C 退出。回放命令默认选择{args.arm}臂。', flush=True)
+        with Console() as console:
+            while rclpy.ok():
+                rclpy.spin_once(node, timeout_sec=.02)
+                now = time.monotonic()
+                state = snapshot(node.cache, now, args.max_age, args.max_skew)
+                if session.mode == 'collecting' and state['valid'] != last_valid:
+                    print('状态就绪，按回车记录点。' if state['valid'] else
+                          '状态不可用：' + '; '.join(state['errors']), flush=True)
+                    last_valid = state['valid']
+                keys = console.poll()
+                if '\x04' in keys:
                     break
-                text = line.strip()
-                if session.mode == 'naming':
-                    label = session.name(text)
-                    if label:
-                        print(f'已保存 {label}。按回车开始下一条记录。', flush=True)
-                    else:
-                        print('名称不能为空，请输入名称后回车。', flush=True)
-                elif text:
-                    print('请直接按回车开始/停止；停止之后再输入名称。', flush=True)
-                elif session.mode == 'idle':
-                    if session.begin(state, now - start):
-                        next_sample = now
-                        print(f'开始第 {session.records} 条记录，按回车停止。', flush=True)
-                    else:
-                        print('拒绝开始：' + '; '.join(state['errors']), flush=True)
-                else:
-                    session.stop(state, now - start)
-                    print('已停止采样，请输入本条名称后回车（自动追加序号）。', flush=True)
-                    if not state['valid'] or session.invalid_samples:
-                        print('本段含无效反馈，仍保留原始记录，但回放会拒绝。', flush=True)
+                for key in keys:
+                    if session.mode == 'naming':
+                        if key in ('\n', '\r'):
+                            print()
+                            label = session.name(name_buffer)
+                            if label:
+                                print(f'已保存动作序列：{label}', flush=True)
+                                preview, run = replay_commands(directory/'events.jsonl', label, args.arm)
+                                print('预览命令（不运动）：\n' + preview, flush=True)
+                                print('执行命令（会先接近起点，再依次运动；需确认路径无碰撞）：\n' + run, flush=True)
+                                print('可继续按回车记录下一条序列，或 Ctrl+C 退出。', flush=True)
+                                name_buffer = ''
+                            else:
+                                print('名称不能为空，请重新输入：', end='', flush=True)
+                        elif key in ('\x7f', '\b'):
+                            if name_buffer:
+                                name_buffer = name_buffer[:-1]
+                                print('\b \b', end='', flush=True)
+                        elif key.isprintable():
+                            name_buffer += key
+                            print(key, end='', flush=True)
+                    elif key.lower() == 'q':
+                        if session.stop():
+                            name_buffer = ''
+                            print('已停止记录。请输入动作名称后回车（追加本次序号）：', end='', flush=True)
+                        else:
+                            print('还没有点位，请先按回车记录。', flush=True)
+                    elif key in ('\n', '\r'):
+                        if session.mark(state, now-start):
+                            print(f'已记录 {session.point_ids[-1]}，当前序列共 {len(session.point_ids)} 个点。', flush=True)
+                        else:
+                            print('拒绝记录：' + '; '.join(state['errors']), flush=True)
 
     except KeyboardInterrupt:
         pass
@@ -250,7 +266,7 @@ def main():
             node.destroy_node()
         if initialized and rclpy.ok():
             rclpy.shutdown()
-        print(f'记录结束：{session.points} 条已命名记录，{session.samples} 个采样。文件：{directory}', flush=True)
+        print(f'记录结束：{session.records} 条已命名序列，{session.points} 个手动点。文件：{directory}', flush=True)
 
 
 if __name__ == '__main__':

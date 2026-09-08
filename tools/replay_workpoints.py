@@ -44,32 +44,50 @@ def plan(path, target, start, arm, max_step=.2, max_gap=.5, other_tolerance=.05)
                 events.append(json.loads(line))
             except ValueError as exc:
                 raise ValueError(f'第 {number} 行不是完整 JSON；先正常退出记录器') from exc
-    if not events or events[0].get('type') != 'metadata' or events[0].get('schema_version') not in (1, 2):
+    if not events or events[0].get('type') != 'metadata' or events[0].get('schema_version') not in (1, 2, 3):
         raise ValueError('不支持的记录格式')
-    points = [e for e in events if e.get('type') == 'waypoint']
-    end = pick(points, target)
-    end_index = events.index(end)
-    if events[0]['schema_version'] == 2:
-        if end.get('role') != 'end':
-            raise ValueError('目标必须是已命名记录的终点')
-        paired_start = end['segment']['from_point_id']
-        if start and pick(points, start)['point_id'] != paired_start:
-            raise ValueError('新格式只回放同一条记录的起终点，不能跨段')
-        start = paired_start
-    begin = pick(points, start) if start else None
-    begin_index = events.index(begin) if begin else 0
-    if begin_index >= end_index:
-        raise ValueError('起点必须在终点之前；不自动反向或跳转')
-    segment = events[begin_index + 1:end_index]
-    samples = [e for e in segment if e.get('type') == 'sample']
-    skipped = 0
-    if begin is None:
-        while samples and not samples[0].get('valid'):
-            skipped += 1
-            samples.pop(0)
-    if not samples and begin is None:
-        raise ValueError('目标点前没有有效轨迹，无法按记录路径接近')
-    route = ([begin] if begin else []) + samples + [end]
+    manual = events[0]['schema_version'] == 3
+    if manual:
+        sequences = [e for e in events if e.get('type') == 'sequence']
+        matches = [e for e in sequences if e.get('sequence_id') == target]
+        matches = matches or [e for e in sequences if e.get('label') == target]
+        if len(matches) != 1:
+            raise ValueError('动作序列不存在或名称不唯一')
+        sequence = matches[0]
+        if start:
+            raise ValueError('手动序列从其第一个点开始，不使用 --from')
+        points = [e for e in events if e.get('type') == 'waypoint']
+        ids = sequence['point_ids']
+        if not ids or len(set(ids)) != len(ids):
+            raise ValueError('动作序列为空或含重复点编号')
+        route = [pick(points, point_id) for point_id in ids]
+        end = {**route[-1], 'point_id': sequence['sequence_id'], 'label': sequence['label']}
+        skipped = 0
+    else:
+        points = [e for e in events if e.get('type') == 'waypoint']
+        end = pick(points, target)
+        end_index = events.index(end)
+        if events[0]['schema_version'] == 2:
+            if end.get('role') != 'end':
+                raise ValueError('目标必须是已命名记录的终点')
+            paired_start = end['segment']['from_point_id']
+            if start and pick(points, start)['point_id'] != paired_start:
+                raise ValueError('新格式只回放同一条记录的起终点，不能跨段')
+            start = paired_start
+        begin = pick(points, start) if start else None
+        begin_index = events.index(begin) if begin else 0
+        if begin_index >= end_index:
+            raise ValueError('起点必须在终点之前；不自动反向或跳转')
+        segment = events[begin_index + 1:end_index]
+        samples = [e for e in segment if e.get('type') == 'sample']
+        skipped = 0
+        if begin is None:
+            while samples and not samples[0].get('valid'):
+                skipped += 1
+                samples.pop(0)
+        if not samples and begin is None:
+            raise ValueError('目标点前没有有效轨迹，无法按记录路径接近')
+        route = ([begin] if begin else []) + samples + [end]
     other = 'left_arm' if arm == 'right_arm' else 'right_arm'
     first, names, frame = joints(route[0], arm)
     other_first, other_names, other_frame = joints(route[0], other)
@@ -83,12 +101,12 @@ def plan(path, target, start, arm, max_step=.2, max_gap=.5, other_tolerance=.05)
         if distance(oq, other_first) > other_tolerance:
             raise ValueError('另一只臂在记录中也明显移动；此脚本不支持双臂协同回放')
         t = e['elapsed_seconds']
-        if not math.isfinite(t) or t < previous_time or t - previous_time > max_gap:
+        if not math.isfinite(t) or t < previous_time or (not manual and t - previous_time > max_gap):
             raise ValueError('轨迹采样时间倒退或间隔过大')
-        if distance(q, previous) > max_step:
+        if not manual and distance(q, previous) > max_step:
             raise ValueError(f'相邻记录关节跳变 {distance(q, previous):.3f} rad 超过 {max_step:.3f} rad（{previous_time:.3f}s → {t:.3f}s），拒绝跨越')
         previous, previous_time = q, t
-    return {'namespace': events[0]['namespace'], 'arm': arm, 'other': other,
+    return {'manual': manual, 'namespace': events[0]['namespace'], 'arm': arm, 'other': other,
             'route': route, 'names': names, 'frame': frame,
             'other_names': other_names, 'other_frame': other_frame,
             'other_start': other_first, 'skipped': skipped,
@@ -185,7 +203,7 @@ def execute(p, args):
             if distance(current, previous) > args.start_tolerance:
                 raise RuntimeError('执行前反馈偏离上一步目标')
             q = joints(event, p['arm'])[0]
-            if distance(q, current) > args.max_step + args.start_tolerance:
+            if not p.get('manual') and distance(q, current) > args.max_step + args.start_tolerance:
                 raise RuntimeError('当前状态到目标的跳变过大')
             print(f'下发 {index}/{len(p["route"])-1}', flush=True)
             move(q, args.speed, args.accel, args.reached_tolerance)
@@ -233,11 +251,14 @@ def main():
     try:
         p = plan(args.file, args.to, args.start, args.arm + '_arm', args.max_step, args.max_gap)
         original_count = len(p['route'])
-        p['route'] = compact_route(p['route'], p['arm'], args.min_step, args.max_step)
+        if not p.get('manual'):
+            p['route'] = compact_route(p['route'], p['arm'], args.min_step, args.max_step)
         route = p['route']
         print(f'原始状态 {original_count} 个 → 下发目标 {len(route)-1} 个；速度 {args.speed} rad/s，加速度 {args.accel} rad/s²')
         print(f'目标：{p["target"]} ({p["label"]})；控制 {p["arm"]}；命名空间 {p["namespace"]}')
         print(f'路径状态数：{len(route)}；记录时长：{route[-1]["elapsed_seconds"]-route[0]["elapsed_seconds"]:.2f}s；忽略启动无效采样：{p["skipped"]}')
+        if p.get('manual'):
+            print('手动点序列：保留每个点，点间由 MoveJ 插值；未记录点间路径，不套用连续采样间隔/跳变阈值。')
         print('起点关节(rad)：', joints(route[0], p['arm'])[0])
         print('终点关节(rad)：', joints(route[-1], p['arm'])[0])
         print('逐点 MoveJ 回放，不复现原始时序；没有碰撞规划。不会自动使能。')

@@ -50,70 +50,74 @@ class RecordingTests(unittest.TestCase):
         c[KEYS[0]][0]['position'] = [0.]
         self.assertFalse(snapshot(c, 10.1, .5, .15)['valid'])
 
-    def test_two_enter_records_and_frozen_stop(self):
+    def test_manual_sequence_and_replay_roundtrip(self):
         with tempfile.TemporaryDirectory() as tmp:
-            session = Session(Path(tmp) / 'run', {'schema_version': 2, 'namespace': '/robot1'})
+            session = Session(Path(tmp) / 'run', {'schema_version': 3, 'namespace': '/robot1'})
             good = snapshot(cache(), 10.1, .5, .15)
             bad = snapshot({}, 10.1, .5, .15)
-            session.sample(good, 0.)
-            self.assertEqual(session.samples, 0)
-            self.assertFalse(session.begin(bad, .1))
-            self.assertTrue(session.begin(good, .2))
-            session.sample(good, .3)
-            session.stop(good, .4)
-            good['states'][KEYS[0]]['message']['position'][0] = .01
-            session.sample(good, .5)
-            self.assertEqual(session.samples, 1)
+            self.assertFalse(session.stop())
+            self.assertFalse(session.mark(bad, 0.))
+            self.assertTrue(session.mark(good, 1.))
+            good['states']['right_arm/joint_states']['message']['position'][0] = .8
+            self.assertTrue(session.mark(good, 40.))
+            session.stop()
+            self.assertFalse(session.mark(good, 41.))
+            good['states']['right_arm/joint_states']['message']['position'][0] = 1.2
             self.assertIsNone(session.name(' '))
             self.assertEqual(session.name('lift'), 'lift_001')
-            session.sample(good, .6)
-            self.assertTrue(session.begin(good, 20.))
-            session.sample(good, 20.1)
-            session.stop(good, 20.2)
+            self.assertTrue(session.mark(good, 100.))
+            session.stop()
             self.assertEqual(session.name('lift'), 'lift_002')
             session.close()
             session.close()
-            from replay_workpoints import plan
-            path = session.directory/'events.jsonl'
-            points = [e for e in map(json.loads, path.read_text().splitlines()) if e['type']=='waypoint']
-            self.assertEqual(points[1]['states'][KEYS[0]]['message']['position'][0], 0.)
-            self.assertEqual(points[1]['elapsed_seconds'], .4)
-            self.assertEqual(len(plan(path, 'lift_002', None, 'right_arm')['route']), 3)
-            self.assertEqual(plan(path, 'lift_002', None, 'right_arm')['route'][0]['elapsed_seconds'], 20.)
-            with self.assertRaises(ValueError):
-                plan(path, 'lift_002', 'record_001_start', 'right_arm')
-
-    def test_stop_on_bad_data_and_unfinished_record(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            session = Session(Path(tmp) / 'run', {'schema_version': 2, 'namespace': '/robot1'})
-            good = snapshot(cache(), 10.1, .5, .15)
-            bad = snapshot({}, 10.1, .5, .15)
-            session.begin(good, .1)
-            session.sample(bad, .2)
-            self.assertTrue(session.stop(bad, .3))
-            self.assertEqual(session.mode, 'naming')
-            session.name('bad')
-            session.begin(good, .4)
-            session.sample(good, .5)
-            session.close()
             path=session.directory/'events.jsonl'
             es=[json.loads(line) for line in path.read_text().splitlines()]
-            self.assertEqual(es[-1]['unfinished_record_id'], 'record_002')
-            from replay_workpoints import plan
-            with self.assertRaises(ValueError):plan(path, 'bad_001', None, 'right_arm')
+            self.assertEqual(sum(e['type']=='waypoint' for e in es),3)
+            self.assertFalse(any(e['type']=='sample' for e in es))
+            from replay_workpoints import plan, joints
+            p=plan(path,'lift_001',None,'right_arm')
+            self.assertTrue(p['manual'])
+            self.assertEqual([joints(e,'right_arm')[0][0] for e in p['route']],[0.,.8])
+            self.assertEqual(len(plan(path,'lift_002',None,'right_arm')['route']),1)
 
-    def test_nonfinite_is_saved_as_null(self):
+    def test_quit_before_naming_preserves_points(self):
         with tempfile.TemporaryDirectory() as tmp:
-            session = Session(Path(tmp) / 'run', {})
-            session.begin(snapshot(cache(), 10.1, .5, .15), 0.)
-            c = cache()
-            c[KEYS[0]][0]['position'][0] = float('nan')
-            session.sample(snapshot(c, 10.1, .5, .15), 0.)
+            session=Session(Path(tmp)/'run',{'schema_version':3,'namespace':'/robot1'})
+            session.mark(snapshot(cache(),10.1,.5,.15),1.)
+            session.stop()
             session.close()
-            raw = (session.directory / 'events.jsonl').read_text()
-            self.assertNotIn('NaN', raw)
-            events = [json.loads(line) for line in raw.splitlines()]
-            self.assertIsNone(next(e for e in events if e['type']=='sample')['states'][KEYS[0]]['message']['position'][0])
+            es=[json.loads(l) for l in (session.directory/'events.jsonl').read_text().splitlines()]
+            self.assertFalse(any(e['type']=='sequence' for e in es))
+            self.assertEqual(es[-1]['unfinished_point_ids'],['point_001'])
+
+    def test_commands_quote_labels_and_paths(self):
+        from record_workpoints import replay_commands
+        import shlex
+        path=Path('/tmp/a b/记录/events.jsonl')
+        label="lift ' $(touch /tmp/unsafe)_001"
+        preview,run=replay_commands(path,label,'left')
+        self.assertEqual(shlex.split(preview)[2],str(path))
+        self.assertEqual(shlex.split(preview)[6],label)
+        self.assertNotIn('--execute',shlex.split(preview))
+        self.assertEqual(shlex.split(run)[-1],'--execute')
+
+    def test_console_immediate_q_and_restoration(self):
+        import os, pty, termios
+        from unittest.mock import patch
+        from record_workpoints import Console
+        master,slave=pty.openpty()
+        stream=os.fdopen(os.dup(slave),'r')
+        before=termios.tcgetattr(slave)
+        try:
+            with patch('sys.stdin',stream):
+                with Console() as console:
+                    os.write(master,b'q')
+                    import select
+                    select.select([slave],[],[],1.)
+                    self.assertEqual(console.poll(),'q')
+            self.assertEqual(termios.tcgetattr(slave),before)
+        finally:
+            stream.close();os.close(master);os.close(slave)
 
 
 if __name__ == '__main__':

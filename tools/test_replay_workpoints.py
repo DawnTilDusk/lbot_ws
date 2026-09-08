@@ -72,8 +72,21 @@ class ReplayTests(unittest.TestCase):
         repeated=[event('sample', i*.1, 0.) for i in range(50)]
         self.assertEqual(len(compact_route(repeated,'right_arm',.002,.2)),2)
 
-    def run_mock(self, offset=0., success=True, approach=False, other_offset=0., update=True):
+    def test_legacy_v2_pair_still_supported(self):
+        es=events()
+        es[0]['schema_version']=2
+        es[3].update(role='start',record_id='record_001')
+        es[-1].update(role='end',record_id='record_001',segment={'from_point_id':'point_001'})
+        p=self.make_plan(es)
+        self.assertFalse(p['manual'])
+        self.assertEqual(p['route'][0]['point_id'],'point_001')
+
+    def run_mock(self, offset=0., success=True, approach=False, other_offset=0., update=True, manual=False):
         p=self.make_plan(start='start')
+        if manual:
+            p['manual']=True
+            for e,q in zip(p['route'],[0.,.7,1.4,1.8]):
+                e['states']['right_arm/joint_states']['message']['position']=[q]*7
         feedback=copy.deepcopy(p['route'][0])
         feedback['errors']=[]
         feedback['states']['right_arm/joint_states']['message']['position']=[offset]*7
@@ -100,6 +113,11 @@ class ReplayTests(unittest.TestCase):
         calls,error=self.run_mock(offset=1.)
         self.assertEqual(calls,[])
         self.assertIn('起点',error)
+
+    def test_manual_point_jumps_execute_in_order(self):
+        calls,error=self.run_mock(manual=True)
+        self.assertIsNone(error)
+        self.assertEqual([c.joints[0] for c in calls],[.7,1.4,1.8])
 
     def test_approach_precedes_replay(self):
         calls,error=self.run_mock(offset=1.,approach=True)
