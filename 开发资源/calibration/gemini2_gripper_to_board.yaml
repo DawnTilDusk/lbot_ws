@@ -1,6 +1,6 @@
-parent_frame: right_arm end-effector (pose_states frame)
+parent_frame: left_arm end-effector (pose_states frame)
 child_frame: charuco_board
-translation: [0.19196035336159875, 0.011396203738130033, -0.15674590050778392]
-rotation_xyzw: [-0.02626998220665249, -0.6832390591814005, 0.7288660463568389, -0.0353350040600996]
+translation: [-0.06193849974501454, -0.17623584369399384, -0.3810888983772241]
+rotation_xyzw: [0.5472463161414208, -0.2119602215339614, 0.6696212467442517, 0.4551941562296159]
 units: {translation: m, rotation: quaternion_xyzw}
 note: 末端到标定板的夹持常量；重新夹持/换板后需重新标定。

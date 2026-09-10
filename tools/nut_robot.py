@@ -53,9 +53,22 @@ def _parse_leg_spec(arm, raw, default_trace):
     return resolve_ws(file_), str(raw['sequence']), hand_after, retreat
 
 
+def _parse_ready_spec(arm, raw, default_trace):
+    """left/right.ready -> leg 规格；不配返回 None。ready 是开机纯运动段，不许带手动作。"""
+    if raw is None:
+        return None
+    spec = _parse_leg_spec(arm, raw, default_trace)
+    if spec[2] is not None:
+        raise TaskError(f'{arm}.ready（{spec[1]}）是开机纯运动段，不许配 hand_after'
+                        f'（初始张手由框架在回放前统一发）')
+    if spec[3]:
+        raise TaskError(f'{arm}.ready（{spec[1]}）不支持 retreat（末点就是要停住的 ready 位）')
+    return spec
+
+
 class TaskConfig:
     def __init__(self, yaml_path=DEFAULT_CONFIG, arm_override=None, order_override=None,
-                 detector_override=None):
+                 detector_override=None, speed_scale=1.0):
         self.path = Path(yaml_path)
         if not self.path.exists():
             raise TaskError(f'任务配置文件不存在：{self.path}')
@@ -79,7 +92,25 @@ class TaskConfig:
 
         # ---- 左臂 ----
         left = d('left', {}) or {}
-        self.left_grasp_pose_name = left.get('grasp_orientation', 'left_grasp_init')
+        self.left_trace = left.get('trace', '')
+        # 视觉抓取姿态两种来源：
+        #   字符串  -> task_poses.yaml 里的位姿名（只取三欧拉角）
+        #   映射    -> {sequence: 名, file?: 可选(默认 left.trace), point?: 点序号(默认0)}
+        #              取预录段该点的末端姿态（如 left_grasp_middle pt0 的旋转角）
+        go = left.get('grasp_orientation', 'left_grasp_init')
+        self.grasp_orientation_rec = None
+        if isinstance(go, str):
+            self.left_grasp_pose_name = go
+        elif isinstance(go, dict) and go.get('sequence'):
+            point = int(go.get('point', 0))
+            if point < 0:
+                raise TaskError('left.grasp_orientation.point 不能为负')
+            self.left_grasp_pose_name = None
+            self.grasp_orientation_rec = {
+                'file': go.get('file'), 'sequence': str(go['sequence']), 'point': point}
+        else:
+            raise TaskError('left.grasp_orientation 必须是位姿名字符串，或 '
+                            '{file?, sequence, point?} 映射')
         left_trace = left.get('trace', '')
         if not isinstance(left.get('legs'), list) or not left['legs']:
             raise TaskError('left.legs 必须是非空列表（视觉抓起后依次回放的段）')
@@ -89,6 +120,8 @@ class TaskConfig:
         # home = 第一段第一个点；中央释放必须在某段尾张手
         if not any(leg[2] == 'open' for leg in self.left_legs):
             raise TaskError('左臂 legs 没有任何段 hand_after=open（无法在中央释放螺母）')
+        # 可选开机 ready 段：上使能/张手后逐点回放到其末点（离场位），再开始检测
+        self.left_ready = _parse_ready_spec('left', left.get('ready'), left_trace)
 
         # ---- 右臂 ----
         right = d('right', {}) or {}
@@ -99,6 +132,7 @@ class TaskConfig:
         self.right_approach = _parse_leg_spec('right', appr, right_trace)
         if self.right_approach[2] != 'close':
             raise TaskError('右臂 approach 段必须 hand_after: close（到中央后重抓）')
+        self.right_ready = _parse_ready_spec('right', right.get('ready'), right_trace)
         place = right.get('place', {}) or {}
         self.right_place = {}
         if isinstance(place, dict) and 'sequence' in place:
@@ -141,16 +175,65 @@ class TaskConfig:
         self.state_timeout = float(m.get('state_timeout', 0.5))
         self.settle_seconds = float(m.get('settle_seconds', 0.6))
         self.release_seconds = float(m.get('release_seconds', 0.4))
+        # 节奏停顿（秒）：让各环节衔接可观察、可急停
+        for key, default in (('ready_hold_seconds', 1.0),    # 开机到位后保持
+                             ('point_dwell_seconds', 0.2),   # 每个记录点到位后停顿
+                             ('between_leg_seconds', 0.8),   # 段与段之间
+                             ('pre_hand_seconds', 0.3),      # 张/合手指令前停顿
+                             ('hover_dwell_seconds', 0.5)):  # 视觉段到 hover 后/抬起后
+            val = float(m.get(key, default))
+            if val < 0:
+                raise TaskError(f'motion.{key} 不能为负')
+            setattr(self, key, val)
         self.move_timeout = float(m.get('move_timeout', 60.0))
         self.start_tolerance = float(m.get('start_tolerance', 0.05))
         self.reached_tolerance = float(m.get('reached_tolerance', 0.03))
+        # 分臂到位容差：某臂持物/受力姿态伺服稳态偏差可能系统性地略大于全局值
+        # （现场右臂持螺母伸展时肩滚转稳态停在 0.033rad，重发同目标无效）
+        self.reached_tolerance_left = m.get('reached_tolerance_left')
+        self.reached_tolerance_right = m.get('reached_tolerance_right')
+        for side, val in (('left', self.reached_tolerance_left),
+                          ('right', self.reached_tolerance_right)):
+            if val is None:
+                continue
+            val = float(val)
+            if not 0.0 < val <= 0.1:
+                raise TaskError(f'motion.reached_tolerance_{side} 应在 (0, 0.1] rad')
+            setattr(self, f'reached_tolerance_{side}', val)
         self.other_tolerance = float(m.get('other_tolerance', 0.05))
+        # 服务返回后等反馈进入 reached_tolerance 的最长时间（伺服收敛/重力下沉有滞后）
+        self.reached_wait_seconds = float(m.get('reached_wait_seconds', 3.0))
+        if self.reached_wait_seconds < 0.5:
+            raise TaskError('motion.reached_wait_seconds 不应小于 0.5s')
+        # 服务完成但反馈未到位时，同目标 MoveJ 最多补发次数（每次只发同一目标，逐次收敛）
+        self.reached_reissue_count = int(m.get('reached_reissue_count', 2))
+        if not 0 <= self.reached_reissue_count <= 5:
+            raise TaskError('motion.reached_reissue_count 应在 0~5 之间')
+        # 视觉 MoveJP/MoveL 的笛卡尔到位容差（block 服务会提前返回，必须核对末端实际位姿）
+        self.pose_pos_tolerance = float(m.get('pose_pos_tolerance', 0.01))
+        self.pose_ori_tolerance = float(m.get('pose_ori_tolerance', 0.05))
+        if not 0.0 < self.pose_pos_tolerance <= 0.05:
+            raise TaskError('motion.pose_pos_tolerance 应在 (0, 0.05] m')
+        if not 0.0 < self.pose_ori_tolerance <= 0.2:
+            raise TaskError('motion.pose_ori_tolerance 应在 (0, 0.2] rad')
+
+        # 命令行 --speed 整体倍率：在 yaml 校验之后统一缩放全部运动速度/加速度
+        # （视觉 MoveJP/MoveL、段间接入 MoveJ、序列逐点 MoveJ）。
+        self.speed_scale = float(speed_scale)
+        if self.speed_scale <= 0:
+            raise TaskError(f'--speed 倍率必须为正，当前 {speed_scale}')
+        if self.speed_scale != 1.0:
+            for key in ('speed', 'acce', 'linear_speed', 'linear_acce',
+                        'join_speed', 'join_acce', 'sequence_speed', 'sequence_acce'):
+                setattr(self, key, getattr(self, key) * self.speed_scale)
 
         # ---- 手参数 ----
         h = d('hand', {}) or {}
         self.hand_speed = _hand6(h.get('speed', [80] * 6), 'hand.speed')
         self.hand_force = _hand6(h.get('force', [100] * 6), 'hand.force')
-        self.hand_open_vals = _hand6(h.get('open', [0] * 6), 'hand.open')
+        if h.get('open') is None:
+            raise TaskError('hand.open 必填（开机张开手型；缺省会误发全 0 把手闭合）')
+        self.hand_open_vals = _hand6(h['open'], 'hand.open')
         # 闭合值两级配置：hand.close.{left,right} 给各臂默认值；
         # hand.sizes.{l,m,s} 可用 left/right/joint 按尺寸覆盖
         #   sizes.l: {left: [...], right: [...]}  或裸列表（=双臂共用 joint）
@@ -348,13 +431,29 @@ class RobotClient:
         if not (res is not None and res.success):
             raise TaskError(f'{self.arm} 臂上使能失败')
 
-    def ik_check(self, position, euler_rad):
+    def ik_try(self, position, euler_rad, seed, timeout=8.0):
+        """单次驱动逆解。seed=None 时 joints 留空（驱动按 srv 注释自行读当前角）。
+        返回 'ok' / 'fail'（服务明确返回不可解）/ 'timeout'（服务无响应）。
+        """
         req = self.ik_cli.srv_type.Request()
         req.position.x, req.position.y, req.position.z = [float(v) for v in position]
         req.euler.x, req.euler.y, req.euler.z = [float(v) for v in euler_rad]
-        req.joints = list(self.joints) if self.joints is not None else []
-        res = self._spin_call(self.ik_cli, req, timeout=5)
-        return res is not None and bool(res.success)
+        req.joints = [float(x) for x in seed] if seed is not None else []
+        res = self._spin_call(self.ik_cli, req, timeout=timeout)
+        if res is None:
+            return 'timeout'
+        return 'ok' if bool(res.success) else 'fail'
+
+    def ik_check(self, position, euler_rad, extra_seeds=None):
+        """可达性预检。驱动数值逆解以 joints 为初始种子，臂型离目标远时会单纯因种子
+        收敛失败（而非真不可达）。故依次尝试：当前关节角 -> 调用方给的记录段臂型种子
+        -> 空种子（驱动自行读当前角）。返回 (是否可达, 成功种子序号/None)。
+        """
+        seeds = [self.joints] + list(extra_seeds or []) + [None]
+        for idx, seed in enumerate(seeds):
+            if self.ik_try(position, euler_rad, seed) == 'ok':
+                return True, idx
+        return False, None
 
     def move_pose(self, position, euler_rad, speed, acce, timeout=None):
         req = self._MoveJP.Request()
@@ -403,6 +502,23 @@ class RobotClient:
             time.sleep(settle)
 
     def joint_diff(self, target):
+        diffs = self.joint_diffs(target)
+        return None if diffs is None else max(diffs)
+
+    def joint_diffs(self, target):
+        """逐关节 |当前-目标|（rad），无反馈为 None。"""
         if self.joints is None:
             return None
-        return max(abs(a - b) for a, b in zip(self.joints, target))
+        return [abs(a - b) for a, b in zip(self.joints, target)]
+
+    def pose_errors(self, position, euler_rad):
+        """末端反馈相对笛卡尔目标的 (位置误差 m, 姿态误差 rad, 当前 xyz)，无反馈 None。"""
+        if self.pose is None:
+            return None
+        from scipy.spatial.transform import Rotation as Rot
+        p_act, q_act = self.pose
+        pos_err = float(np.linalg.norm(p_act - np.asarray(position, float)))
+        q_tgt = Rot.from_euler('xyz', np.asarray(euler_rad, float)).as_quat()
+        dot = float(abs(np.dot(q_act / np.linalg.norm(q_act), q_tgt)))
+        ori_err = float(2.0 * np.arccos(min(1.0, max(-1.0, dot))))
+        return pos_err, ori_err, np.asarray(p_act, float)

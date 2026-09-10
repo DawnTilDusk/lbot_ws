@@ -200,46 +200,63 @@ def execute(p, args):
                     raise RuntimeError('另一只臂偏离记录姿态，停止继续下发（确认安全可加 --ignore-other-arm 跳过）')
             return q
 
-        def move(q, speed, accel, tolerance):
-            req = MoveJ.Request()
-            req.joints = [float(v) for v in q]
-            req.speed = speed
-            req.acce = accel
-            req.block = True
+        def move(q, speed, accel, tolerance, max_attempts=3):
+            # 伺服低速时稳态可能停在容差外几毫弧度量级；同一目标重发一次通常即可补齐
+            # （等价于手动再跑一遍脚本），所以这里自动重试，而不是直接放弃整条轨迹。
             q_before = state()
             joint_delta = distance(q_before, q)
-            future = client.call_async(req)
-            deadline = time.monotonic() + args.timeout
-            while not future.done():
-                rclpy.spin_once(node, timeout_sec=.02)
-                state()
-                if time.monotonic() > deadline:
-                    raise RuntimeError('运动服务超时；不再下发，当前运动可能仍在执行')
-            response = future.result()
-            if response is None or not response.success:
-                raise RuntimeError(f'控制器报告运动失败：请检查{p["arm"]}是否已使能、急停是否解除、有无在途运动或故障，'
-                                   f'然后重试（使能：ros2 service call {p["namespace"]}/{p["arm"]}/set_enable '
-                                   'lbot_arm_interfaces/srv/SetEnable "{enable: true}"）')
-            # block=true 的返回时刻可能早于物理到位（低速大角度尤其明显），
-            # 按关节行程/速度给到位等待，并留 2s 加减速余量。
-            budget = min(args.timeout, max(2., joint_delta / speed + 2.))
-            wait_end = time.monotonic() + budget
-            q_at_return = state()
-            while True:
-                rclpy.spin_once(node, timeout_sec=.02)
-                q_now = state()
-                residual = distance(q_now, q)
-                if residual <= tolerance:
-                    break
-                if time.monotonic() > wait_end:
-                    per_joint = [round(abs(a-b), 3) for a, b in zip(q_now, q)]
-                    moved_since_return = distance(q_at_return, q_now)
-                    reason = (f'服务返回后臂仍在运动（{budget:.1f}s 内已继续走 {moved_since_return:.3f} rad），'
-                              'block 返回早于实际到位，可降低接近速度差或增大 --timeout 后重试'
-                              if moved_since_return > tolerance else
-                              '服务返回后臂基本没动，检查使能/抱闸/是否被挡住或控制器有在途运动')
-                    raise RuntimeError(f'服务成功，但 {budget:.1f}s 内反馈未到目标容差：最大残差 {residual:.3f} rad，'
-                                       f'各关节残差 {per_joint}（容差 {tolerance} rad）。{reason}')
+            q_now = q_before
+            for attempt in range(1, max_attempts + 1):
+                # 重发时按当前残差重新计算等待时间。
+                attempt_delta = joint_delta if attempt == 1 else distance(q_now, q)
+                budget = min(args.timeout, max(2., attempt_delta / speed + 2.))
+                req = MoveJ.Request()
+                req.joints = [float(v) for v in q]
+                req.speed = speed
+                req.acce = accel
+                req.block = True
+                future = client.call_async(req)
+                deadline = time.monotonic() + args.timeout
+                while not future.done():
+                    rclpy.spin_once(node, timeout_sec=.02)
+                    state()
+                    if time.monotonic() > deadline:
+                        raise RuntimeError('运动服务超时；不再下发，当前运动可能仍在执行')
+                response = future.result()
+                if response is None or not response.success:
+                    raise RuntimeError(f'控制器报告运动失败：请检查{p["arm"]}是否已使能、急停是否解除、有无在途运动或故障，'
+                                       f'然后重试（使能：ros2 service call {p["namespace"]}/{p["arm"]}/set_enable '
+                                       'lbot_arm_interfaces/srv/SetEnable "{enable: true}"）')
+                # block=true 的返回时刻可能早于物理到位（低速大角度尤其明显），
+                # 按关节行程/速度给到位等待，并留 2s 加减速余量。
+                q_at_return = state()
+                wait_end = time.monotonic() + budget
+                while True:
+                    rclpy.spin_once(node, timeout_sec=.02)
+                    q_now = state()
+                    residual = distance(q_now, q)
+                    if residual <= tolerance:
+                        return
+                    if time.monotonic() > wait_end:
+                        break
+                per_joint = [round(abs(a-b), 3) for a, b in zip(q_now, q)]
+                # 只有“差一点点”才重发同一目标；偏差很大说明没动或被挡住，重试无意义。
+                if attempt < max_attempts and residual <= max(.1, 3 * tolerance):
+                    print(f'到位残差 {residual:.3f} rad 略超容差 {tolerance} rad，重发同一目标补点 '
+                          f'({attempt + 1}/{max_attempts})：{per_joint}', flush=True)
+                    continue
+                moved_total = distance(q_before, q_now)
+                crept = distance(q_at_return, q_now)
+                if moved_total < .02:
+                    reason = '臂基本没有移动，检查使能/抱闸/是否被挡住或控制器有在途运动'
+                elif crept > tolerance:
+                    reason = (f'服务返回后臂仍在运动（等待窗口内又走了 {crept:.3f} rad），'
+                              'block 返回早于实际到位，可增大 --timeout 或降低速度后重试')
+                else:
+                    reason = ('臂已走完绝大部分但伺服稳态停在容差外，重发同一目标仍未补齐；'
+                              '可适当放宽 --reached-tolerance，或检查该姿态是否受力/接近奇异')
+                raise RuntimeError(f'服务成功，但 {budget:.1f}s 内反馈未到目标容差：最大残差 {residual:.3f} rad，'
+                                   f'各关节残差 {per_joint}（容差 {tolerance} rad）。{reason}')
 
         deadline = time.monotonic() + 5.
         while time.monotonic() < deadline:

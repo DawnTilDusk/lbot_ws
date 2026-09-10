@@ -268,6 +268,44 @@ class JsonDetector(DetectorBase):
         return out
 
 
+class InputDetector(DetectorBase):
+    """临时联调用：不走相机，终端手动输入每颗螺母的 base_link 系位置（米）。
+
+    每行 3 个数（空格或逗号分隔）；直接回车跳过该颗（require_all=true 时
+    主流程的缺螺母校验会中止）。姿态仍取 left_grasp_init，与输入无关。
+    """
+
+    def __init__(self, node=None, sub_cfg=None, K=None, reader=input, printer=print):
+        super().__init__(node, sub_cfg, K)
+        self._read = reader
+        self._print = printer
+
+    @staticmethod
+    def parse_line(text):
+        nums = str(text).replace(',', ' ').split()
+        if len(nums) != 3:
+            raise TaskError(f'需要 3 个数（x y z，米），收到 {text!r}')
+        try:
+            return [float(v) for v in nums]
+        except ValueError:
+            raise TaskError(f'位置里有不是数字的内容：{text!r}')
+
+    def detect(self, expected):
+        self._print('手动输入螺母位置（base_link 系、单位米；空格/逗号分隔，回车跳过该颗）')
+        out = []
+        for label in expected:
+            raw = self._read(f'  {SIZE_NAMES_CN[label]}螺母({label}) x,y,z: ')
+            raw = (raw or '').strip()
+            if not raw:
+                continue
+            p = self.parse_line(raw)
+            out.append(normalize(label, p, frame='base_link',
+                                 extra={'source': 'terminal_input'}))
+        if not out:
+            raise TaskError('一颗位置都没输入')
+        return out
+
+
 # ---------------- 像素结果自动补深度包装 -------------------------------------
 
 class DepthPixelDetector(DetectorBase):
@@ -423,6 +461,8 @@ def build_detector(cfg, node=None, K=None):
         return ManualClickDetector(node, sub, K)
     if kind == 'json':
         return JsonDetector(node, sub, K)
+    if kind == 'input':
+        return InputDetector(node, sub, K)
     if kind == 'external':
         if not cfg.detector_external:
             raise TaskError("detector.type=external 但 detector.external 为空")

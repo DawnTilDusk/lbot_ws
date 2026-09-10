@@ -1,0 +1,12 @@
+parent_frame: base_link
+child_frame: camera_color_optical_frame
+translation: [0.024618230719701185, 0.06318823184305704, 0.06948356415939252]
+rotation_xyzw: [-0.5979182706688143, 0.6333210893636843, -0.31217411749673857, 0.3794014493023758]
+method: HORAUD
+samples: 25
+residual_reproj_mean_mm: 17.2867
+residual_reproj_max_mm: 32.7976
+residual_trans_std_mm: 7.4698
+residual_rot_mean_deg: 3.4044
+units: {translation: m, rotation: quaternion_xyzw}
+note: 现场手眼标定结果；相机/支架移动或分辨率/对齐改变后需重新标定。

@@ -1,12 +1,12 @@
 parent_frame: base_link
 child_frame: camera_color_optical_frame
-translation: [-0.016796701260490814, 0.025401106709566343, 0.08548666062869963]
-rotation_xyzw: [0.6325788444507141, -0.588617860511233, 0.28698048328508047, -0.41353986755092864]
-method: PARK
-samples: 29
-residual_reproj_mean_mm: 10.6037
-residual_reproj_max_mm: 24.463
-residual_trans_std_mm: 5.4455
-residual_rot_mean_deg: 1.9611
+translation: [-0.008003487390537238, 0.005394119219781397, 0.12157672837667334]
+rotation_xyzw: [-0.6012451351333054, 0.6397925006573765, -0.2790560485024534, 0.38896987720813403]
+method: HORAUD
+samples: 28
+residual_reproj_mean_mm: 17.1057
+residual_reproj_max_mm: 37.1802
+residual_trans_std_mm: 8.0793
+residual_rot_mean_deg: 2.1173
 units: {translation: m, rotation: quaternion_xyzw}
 note: 现场手眼标定结果；相机/支架移动或分辨率/对齐改变后需重新标定。

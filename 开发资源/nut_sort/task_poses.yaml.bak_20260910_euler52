@@ -1,0 +1,15 @@
+# 由 capture_task_pose.py 写入；position=m, euler=度, joints=rad
+left:
+  left_grasp_init:
+    position_m:
+    - 0.378
+    - 0.326
+    - -0.35
+    euler_deg:
+    - 52.94130027008807
+    - 0.0
+    - -86.28744394670198
+    joints_rad: null
+    frame_id: base_link
+    recorded_at: '2026-09-10T14:20:55'
+right: {}
