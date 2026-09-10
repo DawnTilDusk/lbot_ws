@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+.venv/
+dataset/
+outputs/
+*.npz
+*.npy
+*.db3
+*.mcap
+workbench_screen.png
+offline_preview.png
+offline_detections.json
