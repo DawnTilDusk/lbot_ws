@@ -1,0 +1,8 @@
+{
+  "source": "/home/dawntildusk/nut_vision/runs/nuts_all61_20260910_225515/weights/best.pt",
+  "sha256": "ba48f59e7d8f2f3e065d8275bf30c27547895c505dcd70060885e0ddd79fac64",
+  "classes": {"0": "large", "1": "medium", "2": "small"},
+  "training_images": 61,
+  "additional_epochs": 100,
+  "note": "当前选定模型；并非经独立测试集证明的最优模型。"
+}

@@ -359,7 +359,7 @@ def main():
     p.add_argument('--arm', choices=('left', 'right'), default=None,
                    help='只影响 capture_task_pose 默认臂；任务固定双臂')
     p.add_argument('--order', type=parse_order, default=None)
-    p.add_argument('--detector', choices=('manual', 'json', 'external'), default=None)
+    p.add_argument('--detector', choices=('manual', 'json', 'external', 'yolo'), default=None)
     p.add_argument('--execute', action='store_true')
     args = p.parse_args()
 
@@ -384,6 +384,10 @@ def main():
             execute(cfg, store, R, t, K, left_legs, appr, places, release_leg)
         else:
             detections = []
+            if cfg.detector_type == 'yolo':
+                from nut_yolo import detect_once
+                detections, _ = detect_once(cfg)
+                validate_detections(cfg, detections)
             if cfg.detector_type in ('json', 'external'):
                 from nut_detectors import build_detector
                 detector = build_detector(cfg, None, K)

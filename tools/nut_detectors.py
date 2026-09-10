@@ -413,6 +413,10 @@ def build_detector(cfg, node=None, K=None):
         'depth_info_topic': cfg.depth_info_topic,
         'camera_info_path': cfg.camera_info_path,
     }
+    if kind == 'yolo':
+        from nut_yolo import YoloDetector
+        sub['_vision']['extrinsics_path'] = str(cfg.extrinsics_path)
+        return YoloDetector(node, sub, K)
     if kind == 'manual':
         if node is None:
             raise TaskError('manual 检测器需要 rclpy 节点')
@@ -427,4 +431,4 @@ def build_detector(cfg, node=None, K=None):
         # 真机：包一层，允许外部算法只返回画面像素 u/v，深度由框架补
         inner = load_external_detector(cfg.detector_external, node, sub, K)
         return DepthPixelDetector(inner, node, sub, K)
-    raise TaskError(f'未知检测器类型 {kind!r}（manual/json/external）')
+    raise TaskError(f'未知检测器类型 {kind!r}（manual/json/external/yolo）')

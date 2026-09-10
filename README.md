@@ -1,5 +1,115 @@
 # LBot ROS2 SDK 资料总览
 
+## 螺母视觉与双臂抓放
+
+当前工作区提供采图、YOLO 大中小螺母检测、中心定位、深度坐标转换和双臂抓放接入。
+完整任务说明见 [tools/NUT_TASK.md](tools/NUT_TASK.md)，标定说明见
+[tools/CALIBRATION.md](tools/CALIBRATION.md)。下列命令使用 **zsh**；Bash 终端将
+`setup.zsh` 换为 `setup.bash`。在仓库根目录运行。
+
+### 环境与相机
+
+- ROS 2 Jazzy、系统 Python 3、`rclpy`、`cv_bridge`、OpenCV、NumPy、SciPy、PyYAML。
+- 实时中文界面还需要 Pillow 和 Noto CJK 字体；Ubuntu 可安装
+  `sudo apt install python3-pil fonts-noto-cjk`。
+- 模型推理使用独立 Conda 环境，与 ROS Python 隔离：
+
+```zsh
+conda create -n nut-yolo python=3.11 -y
+conda activate nut-yolo
+python -m pip install ultralytics
+conda deactivate
+```
+
+已安装 Orbbec ROS 2 驱动后，在独立终端启动 Gemini 2：
+
+```zsh
+source /opt/ros/jazzy/setup.zsh
+source ~/orbbec_ws/install/setup.zsh
+ros2 launch orbbec_camera gemini2.launch.py \
+  enable_color:=true enable_depth:=true depth_registration:=true \
+  enable_point_cloud:=false
+```
+
+需要能订阅 `/camera/color/image_raw`、`/camera/depth/image_raw` 和
+`/camera/color/camera_info`。远程运行时确认 ROS 网络和 `ROS_DOMAIN_ID` 一致。
+只有话题名不足以证明有画面，可用 `ros2 topic info /camera/color/image_raw` 检查发布者。
+
+### 实时视频、中心与三维坐标
+
+```zsh
+source /opt/ros/jazzy/setup.zsh
+/usr/bin/python3 tools/nut_yolo_live.py --device 0
+```
+
+窗口左侧显示大/中/小检测框和中心十字，右侧显示置信度、像素中心、相机 XYZ 和
+机器人 `base_link` XYZ（米）。模型常驻后台，仅处理最新配对帧。
+`--device cpu` 使用 CPU，`--scale 0.6` 缩小窗口，`--conf 0.6` 调整检测阈值。
+按 `s` 保存画面和 JSON；按 `q`、ESC 或关闭窗口退出。正常退出保存最后一次快照。
+输出目录为 `recordings/yolo_live/<时间戳>/`。深度无效时显示错误，断流或帧过期时隐藏旧坐标。
+这个入口没有机械臂运动客户端。
+
+### 单次检测与离线复现
+
+```zsh
+# 实时获取一对彩色/深度并打印坐标，不运动
+/usr/bin/python3 tools/nut_yolo_preview.py
+# 只有照片：只输出像素中心
+/usr/bin/python3 tools/nut_yolo_preview.py --image /path/to/photo.png
+# 已有同帧彩色、对齐深度和内参：计算 XYZ
+/usr/bin/python3 tools/nut_yolo_preview.py --image /path/to/color.png \
+  --depth /path/to/depth.npy --camera-info /path/to/camera_info.yaml
+```
+
+单次预览输出到 `recordings/yolo_preview/<时间戳>/`，包含中心标注图、原彩色图、深度、
+内参和 `detections.json`。深度支持 uint16 毫米 PNG 或浮点米 NPY，不能使用深度伪彩图。
+
+### 主业务入口
+
+```zsh
+# 读取实时检测并打印抓放计划，不运动
+/usr/bin/python3 tools/nut_pick_place.py --detector yolo
+# 实际驱动双臂：先回 home，再检测、IK 预检、抓取与交接
+source install/setup.zsh
+/usr/bin/python3 tools/nut_pick_place.py --detector yolo --execute
+```
+
+链路为 `YOLO 框中心 → 对齐深度中位数 → 内参反投影 → 相机 XYZ → 外参换算 →
+base_link XYZ → 左臂抓取 → 双臂交接序列`。缺少要求的类别或同类多目标时，主业务中止。
+配置位于 [nut_task.yaml](开发资源/nut_sort/nut_task.yaml) 的 `detector` 段，默认仍为 manual，
+用 `--detector yolo` 切换。更换电脑时修改 Conda `python` 路径；更换相机安装后重新核对标定。
+
+### 拍照与标注数据
+
+```zsh
+/usr/bin/python3 tools/capture_nut_images.py
+# 每 3 秒一张，共 100 张；SSH 无窗口可追加 --no-preview
+/usr/bin/python3 tools/capture_nut_images.py --interval 3 --count 100
+```
+
+空格/`s` 拍照，`a` 切换定时采集，`q` 退出。默认原图保存到
+`/home/dawntildusk/nut_vision/raw/<时间戳>/images/`，可用 `--output` 修改根目录。
+上传原图至 CVAT，使用 large/medium/small 矩形标签，导出 Ultralytics YOLO Detection 格式。
+训练时图片与标签保持同名，类别编号以导出配置为准。
+
+### 模型、验证与限制
+
+运行使用 [weights/nut_best.pt](weights/nut_best.pt)，来源和 SHA256 在
+[weights/nut_best.json](weights/nut_best.json)。这是在 61 张标注照片上追加训练 100 轮的选定模型；
+训练集自检 mAP50 约 97.8%，**不代表独立测试效果**。未训练照片测试仍存在漏检与机械臂部件误检。
+中心取检测框中心，未精定位孔轮廓；中心邻域深度可能落到桌面，不能直接认为是指尖接触点。
+当前外参记录平均残差约 10.6 mm，双臂交接点差异约 69 mm，执行前需完成现场坐标与路径核对。
+
+```zsh
+source /opt/ros/jazzy/setup.zsh
+PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 -m unittest discover -s tools -p 'test_*.py'
+# 只读连接真实相机，限时验证实时检测
+/usr/bin/python3 tools/nut_yolo_live.py --device 0 --no-preview --duration 15
+```
+
+训练环境为 Python 3.11、Ultralytics 8.4.146；现场已验证 GPU 常驻推理和真实 RGB/深度重放。
+测试使用模拟运动接口，不会驱动实物。
+
 ## 这份资料是什么
 
 本目录是本次赛事提供给参赛队的 ROS2 SDK 工作空间：

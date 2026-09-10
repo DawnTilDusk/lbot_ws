@@ -9,6 +9,111 @@
 视觉只负责**左臂抓螺母这一下**；之后所有固定运动（离场、转运、中央重抓、入盒）都回放
 用 `record_workpoints.py` 预录的关节序列。框架默认 dry-run，`--execute` 才动真机。
 
+## 采集 YOLO 标注照片
+
+`capture_nut_images.py` 只订阅彩色图，不依赖标定板、不调用机械臂服务。
+先启动相机驱动；远程订阅时使用与机器人一致的 ROS_DOMAIN_ID 和可互通的 ROS 网络。
+在要保存照片的电脑上运行（采图用 ROS 系统 Python，训练另用 Conda）：
+
+```bash
+cd /home/dawntildusk/lbot_ws
+source /opt/ros/jazzy/setup.zsh     # 当前终端为 zsh；bash 终端改用 setup.bash
+ros2 topic list                    # 确认有 /camera/color/image_raw
+/usr/bin/python3 tools/capture_nut_images.py
+```
+
+预览窗口中：空格或 `s` 拍一张，`a` 开启/暂停每 3 秒采图，`q`/ESC 退出。
+按 Ctrl+C 也可退出。定时采图启动即开启的用法：
+
+```bash
+/usr/bin/python3 tools/capture_nut_images.py --interval 3 --count 100
+# SSH 无图形界面：
+/usr/bin/python3 tools/capture_nut_images.py --interval 3 --count 100 --no-preview
+```
+
+默认保存到 `/home/dawntildusk/nut_vision/raw/<本次时间戳>/images/*.png`，
+同一会话的 `frames.jsonl` 记录源话题、消息时间戳和分辨率。
+上传 `images` 中的 PNG 到 CVAT 即可；图片保持原分辨率、不含预览文字。
+`--output` 可修改保存根目录，`--color-topic` 可修改彩色话题。
+断流超过 1 秒时暂停保存；同一接收帧或非零消息时间戳不会重复保存。
+保持相机安装与实际抓取一致，变换螺母摆放后等手离开画面再拍；自动模式可按 `a` 暂停后摆放。
+本脚本仅保存训练所需的彩色照片，不保存深度或生成标注。
+
+## YOLO 中心定位与主业务接入
+
+### 实时视频窗口
+
+```zsh
+cd /home/dawntildusk/lbot_ws
+source /opt/ros/jazzy/setup.zsh
+/usr/bin/python3 tools/nut_yolo_live.py --device 0
+```
+
+需要已启动彩色、对齐深度和彩色 camera_info。模型在 Conda 子进程中常驻，
+后台推理只处理最新配对帧；窗口显示检测帧本身，不把旧框叠到新画面。
+左侧标注大/中/小和中心十字，右侧显示置信度、像素中心、相机 XYZ 与基座 XYZ（米）。
+深度无效的目标仍显示框，但不显示虚构坐标；断流或检测帧过期则隐藏旧坐标。
+标题区域显示推理更新速率和检测帧龄。`q`/ESC 或关闭窗口退出，`s` 保存当前结果；
+正常退出也保存最后一次检测快照，位于 `recordings/yolo_live/<时间戳>/`。
+JSON 含彩色/深度消息时间戳，快照不应当作实时运动指令。
+
+`--device cpu` 使用 CPU，`--conf 0.6` 调整置信度，`--scale 0.6` 缩小窗口。
+中文依赖系统 Pillow 与 Noto CJK 字体，`--font` 可指定其它中文字库。
+无图形界面测试：`--no-preview --duration 15`。
+该脚本没有运动客户端；它复用中心邻域深度策略，仍需注意螺母孔可能测到桌面。
+
+工作区模型为 `weights/nut_best.pt`，来源和 SHA256 记录在 `weights/nut_best.json`。
+它是 61 张照片追加训练后的选定权重，独立照片测试仍有漏检/误检。
+ROS 系统 Python 负责相机与运动接口，`nut_yolo_infer.py` 子进程使用 Conda 的
+`nut-yolo` 环境执行 YOLO，两者不用安装到同一个 Python 环境。
+
+相机驱动先开启彩色和对齐深度（`depth_registration:=true`），再运行只读预览：
+
+```zsh
+cd /home/dawntildusk/lbot_ws
+source /opt/ros/jazzy/setup.zsh
+/usr/bin/python3 tools/nut_yolo_preview.py
+```
+
+该命令采集一次快照，输出每颗的 `label/confidence/u/v/z/p_cam/p_base`。
+XYZ 均为米，`p_cam` 属于彩色光学坐标系，`p_base` 属于 `base_link`。
+预览结果写入 `recordings/yolo_preview/<时间戳>/`：`centers.jpg` 有中心十字，
+`detections.json` 有完整坐标，另存原始彩色图、深度 NPY 和内参便于复现。
+它只订阅相机，没有机械臂客户端。
+
+离线照片可先只求像素中心；没有对应深度时不会输出虚构 XYZ：
+
+```zsh
+/usr/bin/python3 tools/nut_yolo_preview.py --image /path/to/photo.png
+# 使用预览保存的同帧数据重放完整坐标链路：
+/usr/bin/python3 tools/nut_yolo_preview.py --image /path/to/color.png \
+  --depth /path/to/depth.npy --camera-info /path/to/camera_info.yaml
+```
+
+主业务选择 YOLO（不加 execute 时获取实时坐标并打印计划，不运动）：
+
+```zsh
+/usr/bin/python3 tools/nut_pick_place.py --detector yolo
+# 确认实物坐标、抓取高度、交接点后，实际运行：
+source install/setup.zsh
+/usr/bin/python3 tools/nut_pick_place.py --detector yolo --execute
+```
+
+执行路径：YOLO 框中心 -> 配对深度邻域中位数 -> 内参反投影 `p_cam` ->
+现有 `det_base_xyz` 外参换算 -> `run_one_nut` 左臂 hover/down -> 既有双臂序列。
+缺类或同类多目标由现有业务校验中止，不擅自选最高置信度目标。
+执行模式仍沿用现有行为：先使能并回 home，后检测及 IK 预检。
+
+`nut_task.yaml` 的 detector 段提供模型、Conda python、confidence、imgsz、device、
+可选原图像素 `roi` 等设置；默认仍是 manual，传 `--detector yolo` 切换。
+默认 CPU 推理，也可按机器情况设置 `device: '0'` 使用 GPU。
+实时模式采用当前彩色 camera_info，要求彩色/深度分辨率一致、消息时间差不超过 0.1s，
+接收帧龄不超过 1s；推理结果超过 10s 则拒绝。不同尺寸不会用简单缩放冒充深度对齐。
+
+注意：中心是检测框中心，未做孔轮廓精定位。沿用原点选工具的中心邻域深度策略，
+螺母孔可能测到桌面；输出不是自动修正后的指尖接触点，需要现场核对抓取高度。
+外参必须对应当前相机安装；纯预览坐标成功不等于实物抓取误差已经验证。
+
 ## 1. 执行流程与代码对应
 
 任务开始只做一次，之后每颗螺母（顺序由 `order` 决定）循环：
