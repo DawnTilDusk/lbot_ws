@@ -27,10 +27,40 @@ KEYS = tuple(f'{arm}/{kind}' for arm in ('left_arm', 'right_arm')
              for kind in ('joint_states', 'pose_states'))
 
 
-def snapshot(cache, now, max_age, max_skew):
+class FeedTracker:
+    """Track bit-identical feedback per topic.
+
+    A live resting encoder still jitters by encoder LSBs, so exact payload equality
+    while header stamps advance means the driver is republishing cached feedback
+    (controller offline / arm powered down / e-stop), not a stationary arm.
+    """
+
+    @staticmethod
+    def signature(key, message):
+        if key.endswith('joint_states'):
+            return ('j', tuple(message.get('position', ())))
+        pose = message.get('pose', {})
+        return ('p', tuple(pose.get('position', {}).values()),
+                tuple(pose.get('orientation', {}).values()))
+
+    def __init__(self):
+        self._sig = {}
+        self.last_change = {}
+
+    def update(self, key, message, now):
+        sig = self.signature(key, message)
+        if self._sig.get(key) != sig:
+            self.last_change[key] = now
+        self._sig[key] = sig
+
+    def frozen_age(self, key, now):
+        return now - self.last_change.get(key, now)
+
+
+def snapshot(cache, now, max_age, max_skew, keys=KEYS):
     """Freshness means local reception freshness, not controller health."""
     states, errors, received = {}, [], []
-    for key in KEYS:
+    for key in keys:
         entry = cache.get(key)
         if entry is None:
             errors.append(f'{key}: no data')
@@ -61,7 +91,7 @@ def snapshot(cache, now, max_age, max_skew):
                 errors.append(f'{key}: invalid quaternion')
         if not message['header']['frame_id']:
             errors.append(f'{key}: empty frame_id')
-    if len(received) == len(KEYS) and max(received) - min(received) > max_skew:
+    if len(received) == len(keys) and max(received) - min(received) > max_skew:
         errors.append('topic reception skew exceeds limit')
     return {'valid': not errors, 'errors': errors, 'states': states}
 
@@ -75,6 +105,17 @@ def clean_json(value):
     if isinstance(value, (list, tuple)):
         return [clean_json(v) for v in value]
     return value
+
+
+def waypoint_summary(state, arm):
+    """One-line end-effector xyz of the arm that will be replayed (pose already logged)."""
+    try:
+        msg = state['states'][f'{arm}_arm/pose_states']['message']
+        pos = msg['pose']['position']
+        return (f"{arm}臂末端 xyz=({pos['x']:+.3f}, {pos['y']:+.3f}, {pos['z']:+.3f}) m "
+                f"[{msg['header']['frame_id']}]")
+    except (KeyError, TypeError):
+        return ''
 
 
 class Session:
@@ -162,6 +203,7 @@ class Recorder(Node):
     def __init__(self, namespace):
         super().__init__('workpoint_recorder')
         self.cache = {}
+        self.tracker = FeedTracker()
         self.subscriptions_ = []
         for key in KEYS:
             msg_type = JointState if key.endswith('joint_states') else PoseStamped
@@ -170,7 +212,10 @@ class Recorder(Node):
                 lambda msg, key=key: self.receive(key, msg), qos_profile_sensor_data))
 
     def receive(self, key, msg):
-        self.cache[key] = (message_to_ordereddict(msg), time.monotonic())
+        now = time.monotonic()
+        message = message_to_ordereddict(msg)
+        self.cache[key] = (message, now)
+        self.tracker.update(key, message, now)
 
 
 def positive(value):
@@ -210,6 +255,9 @@ def main():
         node = Recorder(namespace)
         start = time.monotonic()
         last_valid = None
+        last_frozen_warn = 0.
+        last_marked_q = None
+        active_joint_key = f'{args.arm}_arm/joint_states'
         name_buffer = ''
         print(f'记录文件：{directory / "events.jsonl"}', flush=True)
         print(f'每按回车记录一个点；直接按 q 停止并命名；Ctrl+C 退出。回放命令默认选择{args.arm}臂。', flush=True)
@@ -222,6 +270,12 @@ def main():
                     print('状态就绪，按回车记录点。' if state['valid'] else
                           '状态不可用：' + '; '.join(state['errors']), flush=True)
                     last_valid = state['valid']
+                if session.mode == 'collecting' and state['valid'] and now - last_frozen_warn > 2.:
+                    frozen = node.tracker.frozen_age(active_joint_key, now)
+                    if frozen > 2.:
+                        print(f'警告：{args.arm}臂关节反馈已 {frozen:.1f} s 逐位未变；时间戳照常推进通常意味着'
+                              '驱动在重发缓存（控制器掉线/下电/急停）。先活动一下臂，确认下方 xyz 跟随变化后再录。', flush=True)
+                        last_frozen_warn = now
                 keys = console.poll()
                 if '\x04' in keys:
                     break
@@ -237,6 +291,7 @@ def main():
                                 print('执行命令（会先接近起点，再依次运动；需确认路径无碰撞）：\n' + run, flush=True)
                                 print('可继续按回车记录下一条序列，或 Ctrl+C 退出。', flush=True)
                                 name_buffer = ''
+                                last_marked_q = None
                             else:
                                 print('名称不能为空，请重新输入：', end='', flush=True)
                         elif key in ('\x7f', '\b'):
@@ -254,7 +309,18 @@ def main():
                             print('还没有点位，请先按回车记录。', flush=True)
                     elif key in ('\n', '\r'):
                         if session.mark(state, now-start):
-                            print(f'已记录 {session.point_ids[-1]}，当前序列共 {len(session.point_ids)} 个点。', flush=True)
+                            summary = waypoint_summary(state, args.arm)
+                            q_now = state['states'][active_joint_key]['message']['position']
+                            note = ''
+                            if last_marked_q is not None:
+                                delta = max(abs(a-b) for a, b in zip(last_marked_q, q_now))
+                                if delta == 0.:
+                                    note = '  ⚠️ 与上一点关节角完全相同：若你刚移动过臂，说明反馈冻结（驱动缓存/控制器掉线），此点无效！'
+                                elif delta < .002:
+                                    note = f'  ⚠️ 与上一点几乎相同（Δmax={delta:.4f} rad）。'
+                            last_marked_q = q_now[:]
+                            print(f'已记录 {session.point_ids[-1]}，当前序列共 {len(session.point_ids)} 个点。'
+                                  + (f' {summary}' if summary else '') + note, flush=True)
                         else:
                             print('拒绝记录：' + '; '.join(state['errors']), flush=True)
 

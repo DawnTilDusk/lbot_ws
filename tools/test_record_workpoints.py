@@ -2,7 +2,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
-from record_workpoints import KEYS, Session, snapshot
+from record_workpoints import KEYS, Session, snapshot, FeedTracker
 
 
 def cache():
@@ -17,6 +17,34 @@ def cache():
                            'orientation': dict(x=0., y=0., z=0., w=1.)}
         data[key] = (msg, 10.)
     return data
+
+
+class FeedTrackerTests(unittest.TestCase):
+    def test_frozen_vs_live_joints(self):
+        tracker = FeedTracker()
+        key = [k for k in KEYS if k.endswith('joint_states')][0]
+        tracker.update(key, {'position': [1.] * 7}, 10.0)
+        # Identical payload at a later time: feedback frozen although time advanced.
+        tracker.update(key, {'position': [1.] * 7}, 11.0)
+        self.assertEqual(tracker.frozen_age(key, 13.0), 3.0)
+        # A single encoder-LSB change means live feedback.
+        p = [1.] * 7
+        p[3] += .0001
+        tracker.update(key, {'position': p}, 13.5)
+        self.assertEqual(tracker.frozen_age(key, 13.5), 0.0)
+
+    def test_frozen_vs_live_pose(self):
+        tracker = FeedTracker()
+        key = [k for k in KEYS if k.endswith('pose_states')][0]
+        msg = {'pose': {'position': dict(x=1., y=2., z=3.),
+                        'orientation': dict(x=0., y=0., z=0., w=1.)}}
+        tracker.update(key, msg, 5.0)
+        tracker.update(key, msg, 6.0)
+        self.assertEqual(tracker.frozen_age(key, 9.0), 4.0)
+        msg2 = {'pose': {'position': dict(x=1.001, y=2., z=3.),
+                         'orientation': dict(x=0., y=0., z=0., w=1.)}}
+        tracker.update(key, msg2, 9.5)
+        self.assertEqual(tracker.frozen_age(key, 9.5), 0.0)
 
 
 class RecordingTests(unittest.TestCase):
@@ -43,6 +71,13 @@ class RecordingTests(unittest.TestCase):
             self.assertFalse(snapshot(c, 10.1, .5, .15)['valid'])
         c = cache()
         c[KEYS[1]][0]['pose']['orientation']['w'] = 0.
+        self.assertFalse(snapshot(c, 10.1, .5, .15)['valid'])
+
+    def test_snapshot_subset_ignores_unwatched_topics(self):
+        c = cache()
+        del c[KEYS[1]]  # a pose_states topic missing
+        joint_keys = [k for k in KEYS if k.endswith('joint_states')]
+        self.assertTrue(snapshot(c, 10.1, .5, .15, joint_keys)['valid'])
         self.assertFalse(snapshot(c, 10.1, .5, .15)['valid'])
 
     def test_wrong_joint_shape(self):

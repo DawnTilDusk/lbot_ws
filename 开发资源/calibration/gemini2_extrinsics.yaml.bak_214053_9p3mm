@@ -1,0 +1,12 @@
+parent_frame: base_link
+child_frame: camera_color_optical_frame
+translation: [-0.011631084653587326, 0.025801950339269273, 0.0856992341620948]
+rotation_xyzw: [0.6424820635436373, -0.583633093991125, 0.2879616316234782, -0.4045581643420392]
+method: PARK
+samples: 29
+residual_reproj_mean_mm: 9.3081
+residual_reproj_max_mm: 22.4475
+residual_trans_std_mm: 3.8335
+residual_rot_mean_deg: 1.7003
+units: {translation: m, rotation: quaternion_xyzw}
+note: 现场手眼标定结果；相机/支架移动或分辨率/对齐改变后需重新标定。

@@ -1,1 +1,0 @@
-/home/dawntildusk/lbot_ws/src/lbot_driver/lib/lib_install.sh

@@ -1,1 +1,0 @@
-/home/dawntildusk/lbot_ws/build/lbot_teleop/ament_cmake_environment_hooks/local_setup.zsh

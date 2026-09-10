@@ -81,7 +81,14 @@ class ReplayTests(unittest.TestCase):
         self.assertFalse(p['manual'])
         self.assertEqual(p['route'][0]['point_id'],'point_001')
 
-    def run_mock(self, offset=0., success=True, approach=False, other_offset=0., update=True, manual=False):
+    def test_other_arm_moving_rejected_unless_ignored(self):
+        es=events()
+        es[5]['states']['left_arm/joint_states']['message']['position']=[.1]*7
+        with self.assertRaisesRegex(ValueError,'另一只臂'):self.make_plan(es)
+        p=self.make_plan(es, check_other=False)
+        self.assertEqual(p['target'],'point_002')
+
+    def run_mock(self, offset=0., success=True, approach=False, other_offset=0., update=True, manual=False, ignore=False):
         p=self.make_plan(start='start')
         if manual:
             p['manual']=True
@@ -103,7 +110,7 @@ class ReplayTests(unittest.TestCase):
         modules={'rclpy':NS(init=lambda:None,ok=lambda:True,shutdown=lambda:None,spin_once=lambda *a,**k:None),
                  'lbot_arm_interfaces':NS(), 'lbot_arm_interfaces.srv':NS(MoveJ=NS(Request=lambda:NS())),
                  'record_workpoints':NS(Recorder=lambda ns:node,snapshot=lambda *a:feedback)}
-        args=NS(move_to_start=approach, approach_speed=.15, approach_accel=.15, start_tolerance=.05,max_step=.2,speed=.15,accel=.15,timeout=1.,reached_tolerance=.03)
+        args=NS(move_to_start=approach, approach_speed=.15, approach_accel=.15, start_tolerance=.05,max_step=.2,speed=.15,accel=.15,timeout=1.,reached_tolerance=.03,ignore_other_arm=ignore,max_age=.5,max_skew=.15)
         with patch.dict(sys.modules,modules):
             try:execute(p,args)
             except RuntimeError as e:return calls,str(e)
@@ -134,6 +141,11 @@ class ReplayTests(unittest.TestCase):
         calls,error=self.run_mock(offset=1.,approach=True,other_offset=1.)
         self.assertEqual(calls,[])
         self.assertIn('另一只臂',error)
+
+    def test_other_arm_mismatch_can_be_ignored(self):
+        calls,error=self.run_mock(offset=1.,approach=True,other_offset=1.,ignore=True)
+        self.assertIsNone(error)
+        self.assertTrue(calls)
 
     def test_approach_flag_at_start_adds_no_motion(self):
         calls,error=self.run_mock(approach=True)

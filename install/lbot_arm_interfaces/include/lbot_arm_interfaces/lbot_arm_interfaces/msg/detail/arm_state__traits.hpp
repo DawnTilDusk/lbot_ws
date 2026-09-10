@@ -1,1 +1,0 @@
-/home/dawntildusk/lbot_ws/build/lbot_arm_interfaces/rosidl_generator_cpp/lbot_arm_interfaces/msg/detail/arm_state__traits.hpp

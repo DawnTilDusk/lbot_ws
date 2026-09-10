@@ -1,1 +1,0 @@
-/home/dawntildusk/lbot_ws/build/lbot_arm_interfaces/rosidl_typesupport_introspection_c/lbot_arm_interfaces/srv/detail/move_c__rosidl_typesupport_introspection_c.h

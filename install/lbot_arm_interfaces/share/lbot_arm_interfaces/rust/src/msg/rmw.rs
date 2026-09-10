@@ -1,1 +1,0 @@
-/home/dawntildusk/lbot_ws/build/lbot_arm_interfaces/rosidl_generator_rs/lbot_arm_interfaces/rust/src/msg/rmw.rs

@@ -28,6 +28,22 @@ def joints(event, arm):
         raise ValueError('记录缺少关节状态') from exc
 
 
+def pose_xyz(event, arm):
+    """End-effector position (x, y, z in metres); None if this record lacks pose feedback."""
+    try:
+        pos = event['states'][arm + '/pose_states']['message']['pose']['position']
+        xyz = (pos['x'], pos['y'], pos['z'])
+        if not all(isinstance(v, (int, float)) and math.isfinite(v) for v in xyz):
+            return None
+        return xyz
+    except (KeyError, TypeError):
+        return None
+
+
+def fmt_xyz(xyz):
+    return f'({xyz[0]:+.3f}, {xyz[1]:+.3f}, {xyz[2]:+.3f}) m' if xyz else '本记录无末端坐标'
+
+
 def pick(points, selector):
     by_id = [e for e in points if e['point_id'] == selector]
     matches = by_id or [e for e in points if e['label'] == selector]
@@ -36,7 +52,7 @@ def pick(points, selector):
     return matches[0]
 
 
-def plan(path, target, start, arm, max_step=.2, max_gap=.5, other_tolerance=.05):
+def plan(path, target, start, arm, max_step=.2, max_gap=.5, other_tolerance=.05, check_other=True):
     events = []
     with path.open(encoding='utf-8') as f:
         for number, line in enumerate(f, 1):
@@ -51,8 +67,13 @@ def plan(path, target, start, arm, max_step=.2, max_gap=.5, other_tolerance=.05)
         sequences = [e for e in events if e.get('type') == 'sequence']
         matches = [e for e in sequences if e.get('sequence_id') == target]
         matches = matches or [e for e in sequences if e.get('label') == target]
+        if not matches:
+            base = [e for e in sequences if e.get('base_label') == target]
+            if len(base) == 1:
+                matches = base
         if len(matches) != 1:
-            raise ValueError('动作序列不存在或名称不唯一')
+            available = '；'.join(f"{e.get('label')} ({e.get('sequence_id')})" for e in sequences) or '无已命名序列'
+            raise ValueError(f'动作序列 {target!r} 不存在或名称不唯一。可用序列：{available}')
         sequence = matches[0]
         if start:
             raise ValueError('手动序列从其第一个点开始，不使用 --from')
@@ -98,8 +119,8 @@ def plan(path, target, start, arm, max_step=.2, max_gap=.5, other_tolerance=.05)
         oq, ons, ofr = joints(e, other)
         if (ns, fr, ons, ofr) != (names, frame, other_names, other_frame):
             raise ValueError('轨迹中关节名称顺序或坐标系发生变化')
-        if distance(oq, other_first) > other_tolerance:
-            raise ValueError('另一只臂在记录中也明显移动；此脚本不支持双臂协同回放')
+        if check_other and distance(oq, other_first) > other_tolerance:
+            raise ValueError('另一只臂在记录中也明显移动；此脚本不支持双臂协同回放（确认仅回放单臂动作可加 --ignore-other-arm）')
         t = e['elapsed_seconds']
         if not math.isfinite(t) or t < previous_time or (not manual and t - previous_time > max_gap):
             raise ValueError('轨迹采样时间倒退或间隔过大')
@@ -133,9 +154,16 @@ def compact_route(route, arm, min_step, max_step):
 
 def execute(p, args):
     # ROS imports and clients exist only with --execute.
-    import rclpy
-    from lbot_arm_interfaces.srv import MoveJ
-    from record_workpoints import Recorder, snapshot
+    try:
+        import rclpy
+        from lbot_arm_interfaces.srv import MoveJ
+        from record_workpoints import Recorder, snapshot
+    except ModuleNotFoundError as exc:
+        raise RuntimeError(
+            '缺少 ROS 依赖（%s）。请先在本终端 source 环境后再运行：\n'
+            '  source /opt/ros/jazzy/setup.bash\n'
+            '  source install/setup.bash   （在 lbot_ws 目录下；若报 not found 需先 colcon build）'
+            % exc.name) from exc
     node = None
     initialized = False
     try:
@@ -146,16 +174,30 @@ def execute(p, args):
         if not client.wait_for_service(timeout_sec=5.):
             raise RuntimeError('运动服务不可用')
 
+        ignore_other = getattr(args, 'ignore_other_arm', False)
+        # 执行只需关节话题；pose_states 运动时发布更慢，纳入新鲜度检查会误报 skew。
+        watched = [p['arm'] + '/joint_states']
+        if not ignore_other:
+            watched.append(p['other'] + '/joint_states')
+        if ignore_other:
+            print('警告：已跳过另一只臂姿态校验；请自行确认双臂全程无干涉、另一只臂已固定。', flush=True)
+
+        def fresh_snapshot():
+            return snapshot(node.cache, time.monotonic(), args.max_age, args.max_skew, watched)
+
         def state():
-            current = snapshot(node.cache, time.monotonic(), .5, .15)
+            current = fresh_snapshot()
             if not current['valid']:
                 raise RuntimeError('反馈无效：' + '; '.join(current['errors']))
             q, names, frame = joints(current, p['arm'])
-            oq, ons, ofr = joints(current, p['other'])
-            if (names, frame, ons, ofr) != (p['names'], p['frame'], p['other_names'], p['other_frame']):
+            if (names, frame) != (p['names'], p['frame']):
                 raise RuntimeError('实物关节名称/坐标系与记录不一致')
-            if distance(oq, p['other_start']) > args.start_tolerance:
-                raise RuntimeError('另一只臂偏离记录姿态，停止继续下发')
+            if not ignore_other:
+                oq, ons, ofr = joints(current, p['other'])
+                if (ons, ofr) != (p['other_names'], p['other_frame']):
+                    raise RuntimeError('实物关节名称/坐标系与记录不一致')
+                if distance(oq, p['other_start']) > args.start_tolerance:
+                    raise RuntimeError('另一只臂偏离记录姿态，停止继续下发（确认安全可加 --ignore-other-arm 跳过）')
             return q
 
         def move(q, speed, accel, tolerance):
@@ -164,6 +206,8 @@ def execute(p, args):
             req.speed = speed
             req.acce = accel
             req.block = True
+            q_before = state()
+            joint_delta = distance(q_before, q)
             future = client.call_async(req)
             deadline = time.monotonic() + args.timeout
             while not future.done():
@@ -173,19 +217,34 @@ def execute(p, args):
                     raise RuntimeError('运动服务超时；不再下发，当前运动可能仍在执行')
             response = future.result()
             if response is None or not response.success:
-                raise RuntimeError('控制器报告运动失败')
-            deadline = time.monotonic() + 2.
+                raise RuntimeError(f'控制器报告运动失败：请检查{p["arm"]}是否已使能、急停是否解除、有无在途运动或故障，'
+                                   f'然后重试（使能：ros2 service call {p["namespace"]}/{p["arm"]}/set_enable '
+                                   'lbot_arm_interfaces/srv/SetEnable "{enable: true}"）')
+            # block=true 的返回时刻可能早于物理到位（低速大角度尤其明显），
+            # 按关节行程/速度给到位等待，并留 2s 加减速余量。
+            budget = min(args.timeout, max(2., joint_delta / speed + 2.))
+            wait_end = time.monotonic() + budget
+            q_at_return = state()
             while True:
                 rclpy.spin_once(node, timeout_sec=.02)
-                if distance(state(), q) <= tolerance:
+                q_now = state()
+                residual = distance(q_now, q)
+                if residual <= tolerance:
                     break
-                if time.monotonic() > deadline:
-                    raise RuntimeError('服务成功，但反馈未到目标容差内')
+                if time.monotonic() > wait_end:
+                    per_joint = [round(abs(a-b), 3) for a, b in zip(q_now, q)]
+                    moved_since_return = distance(q_at_return, q_now)
+                    reason = (f'服务返回后臂仍在运动（{budget:.1f}s 内已继续走 {moved_since_return:.3f} rad），'
+                              'block 返回早于实际到位，可降低接近速度差或增大 --timeout 后重试'
+                              if moved_since_return > tolerance else
+                              '服务返回后臂基本没动，检查使能/抱闸/是否被挡住或控制器有在途运动')
+                    raise RuntimeError(f'服务成功，但 {budget:.1f}s 内反馈未到目标容差：最大残差 {residual:.3f} rad，'
+                                       f'各关节残差 {per_joint}（容差 {tolerance} rad）。{reason}')
 
         deadline = time.monotonic() + 5.
         while time.monotonic() < deadline:
             rclpy.spin_once(node, timeout_sec=.02)
-            if snapshot(node.cache, time.monotonic(), .5, .15)['valid']:
+            if fresh_snapshot()['valid']:
                 break
         current = state()
         origin = joints(p['route'][0], p['arm'])[0]
@@ -231,6 +290,8 @@ def main():
     parser.add_argument('--arm', choices=('left', 'right'), required=True)
     parser.add_argument('--execute', action='store_true', help='实际发送运动；默认只预览')
     parser.add_argument('--move-to-start', action='store_true', help='执行时先以 MoveJ 低速接近起点；需确认额外路径无碰撞')
+    parser.add_argument('--ignore-other-arm', action='store_true',
+                        help='跳过另一只臂的姿态校验（默认校验，防止双臂干涉）；仅在已确认另一只臂全程无碰撞风险时使用')
     parser.add_argument('--approach-speed', type=positive, default=.15, help='接近起点速度 rad/s，最大 0.3')
     parser.add_argument('--approach-accel', type=positive, default=.15, help='接近起点加速度 rad/s²，最大 0.3')
     parser.add_argument('--speed', type=positive, default=.3, help='rad/s，最大 0.5')
@@ -240,6 +301,8 @@ def main():
     parser.add_argument('--max-step', type=positive, default=.2)
     parser.add_argument('--max-gap', type=positive, default=.5)
     parser.add_argument('--timeout', type=positive, default=30.)
+    parser.add_argument('--max-age', type=positive, default=.5, help='执行时关节反馈允许的最大接收延迟(s)')
+    parser.add_argument('--max-skew', type=positive, default=.15, help='执行时左右关节话题接收时间允许的最大差(s)')
     parser.add_argument('--min-step', type=float, default=.002, help='合并静止附近采样的关节阈值(rad)，0 保留全部点')
     args = parser.parse_args()
     if not math.isfinite(args.min_step) or not 0 <= args.min_step <= min(.01, args.max_step):
@@ -249,7 +312,8 @@ def main():
     if args.speed > .5 or args.accel > .5:
         parser.error('本脚本将速度和加速度限制在 0.5 以内')
     try:
-        p = plan(args.file, args.to, args.start, args.arm + '_arm', args.max_step, args.max_gap)
+        p = plan(args.file, args.to, args.start, args.arm + '_arm', args.max_step, args.max_gap,
+                 check_other=not args.ignore_other_arm)
         original_count = len(p['route'])
         if not p.get('manual'):
             p['route'] = compact_route(p['route'], p['arm'], args.min_step, args.max_step)
@@ -261,8 +325,12 @@ def main():
             print('手动点序列：保留每个点，点间由 MoveJ 插值；未记录点间路径，不套用连续采样间隔/跳变阈值。')
         print('起点关节(rad)：', joints(route[0], p['arm'])[0])
         print('终点关节(rad)：', joints(route[-1], p['arm'])[0])
+        print('起点末端坐标：', fmt_xyz(pose_xyz(route[0], p['arm'])))
+        print('终点末端坐标：', fmt_xyz(pose_xyz(route[-1], p['arm'])))
         print('逐点 MoveJ 回放，不复现原始时序；没有碰撞规划。不会自动使能。')
         print('起点修正：启用；执行时从实时姿态以 MoveJ 接近，非记录路径，没有碰撞规划。' if args.move_to_start else '起点修正：关闭；起点不匹配时拒绝运动。')
+        print('另一只臂校验：已跳过（--ignore-other-arm），需自行确认双臂无干涉。' if args.ignore_other_arm
+              else f'另一只臂校验：启用；执行时{p["other"]}须停在记录姿态，偏差超过 {args.start_tolerance} rad 即中止。')
         if args.execute:
             print('执行模式。Ctrl+C/异常只停止后续下发，不保证撤销在途运动；紧急情况使用实体急停。', flush=True)
             execute(p, args)

@@ -1,1 +1,0 @@
-/home/dawntildusk/lbot_ws/build/lbot_arm_interfaces/rosidl_typesupport_introspection_cpp/lbot_arm_interfaces/msg/detail/follow_joint__rosidl_typesupport_introspection_cpp.hpp

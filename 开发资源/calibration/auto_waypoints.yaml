@@ -1,0 +1,430 @@
+arm: right
+frame: base_link
+euler_convention: intrinsic XYZ (rad)
+units:
+  position: m
+  euler: rad
+speed: 0.5
+acce: 0.5
+note: 自动标定目标点，合并自多次手动会话的真实到达位姿；expected=maybe 的点可能识别不到，超时可跳过。
+waypoints:
+- name: wp_01
+  position:
+  - 0.27802
+  - -0.048
+  - -0.29183
+  euler:
+  - 1.904
+  - -0.14945
+  - -1.51706
+  source:
+  - 20260908_214053_781626/point_001
+  corners_when_sampled: 35
+  expected: visible
+  board_dist_m: 0.578
+- name: wp_02
+  position:
+  - 0.29446
+  - -0.02402
+  - -0.31833
+  euler:
+  - 2.04178
+  - -1.28953
+  - -0.8049
+  source:
+  - 20260908_214053_781626/point_011
+  corners_when_sampled: 35
+  expected: visible
+  board_dist_m: 0.448
+- name: wp_03
+  position:
+  - 0.26908
+  - 0.00632
+  - -0.33229
+  euler:
+  - 2.04448
+  - -0.34136
+  - -0.73471
+  source:
+  - 20260908_214053_781626/point_027
+  corners_when_sampled: 35
+  expected: visible
+  board_dist_m: 0.536
+- name: wp_04
+  position:
+  - 0.25301
+  - 0.02876
+  - -0.31518
+  euler:
+  - 1.5071
+  - -0.53398
+  - -0.32647
+  source:
+  - 20260908_214053_781626/point_020
+  corners_when_sampled: 35
+  expected: visible
+  board_dist_m: 0.557
+- name: wp_05
+  position:
+  - 0.23006
+  - 0.01874
+  - -0.27343
+  euler:
+  - 1.81278
+  - 0.20195
+  - -0.39264
+  source:
+  - 20260908_214053_781626/point_028
+  corners_when_sampled: 35
+  expected: visible
+  board_dist_m: 0.571
+- name: wp_06
+  position:
+  - 0.24093
+  - 0.07003
+  - -0.24855
+  euler:
+  - 1.92168
+  - -0.50132
+  - -0.68833
+  source:
+  - 20260908_214053_781626/point_022
+  corners_when_sampled: 35
+  expected: visible
+  board_dist_m: 0.483
+- name: wp_07
+  position:
+  - 0.1753
+  - 0.04048
+  - -0.25659
+  euler:
+  - 1.67178
+  - -0.00618
+  - -0.55531
+  source:
+  - 20260908_214053_781626/point_023
+  corners_when_sampled: 35
+  expected: visible
+  board_dist_m: 0.521
+- name: wp_08
+  position:
+  - 0.24762
+  - 0.03208
+  - -0.36613
+  euler:
+  - 2.25929
+  - -0.13627
+  - -0.46728
+  source:
+  - 20260908_214053_781626/point_009
+  corners_when_sampled: 35
+  expected: visible
+  board_dist_m: 0.528
+- name: wp_09
+  position:
+  - 0.22719
+  - -0.03009
+  - -0.37747
+  euler:
+  - 2.31534
+  - -0.01825
+  - -0.7446
+  source:
+  - 20260908_214053_781626/point_002
+  corners_when_sampled: 35
+  expected: visible
+  board_dist_m: 0.542
+- name: wp_10
+  position:
+  - 0.27926
+  - -0.10368
+  - -0.32731
+  euler:
+  - 2.90695
+  - -0.75823
+  - -2.14705
+  source:
+  - 20260908_214053_781626/point_013
+  corners_when_sampled: 35
+  expected: visible
+  board_dist_m: 0.387
+- name: wp_11
+  position:
+  - 0.28944
+  - -0.09583
+  - -0.30537
+  euler:
+  - 1.45508
+  - -0.16482
+  - -0.17059
+  source:
+  - 20260908_214053_781626/point_019
+  corners_when_sampled: 35
+  expected: visible
+  board_dist_m: 0.602
+- name: wp_12
+  position:
+  - 0.30145
+  - -0.10599
+  - -0.3593
+  euler:
+  - 2.63025
+  - -0.65085
+  - -1.15214
+  source:
+  - 20260908_214053_781626/point_003
+  corners_when_sampled: 35
+  expected: visible
+  board_dist_m: 0.462
+- name: wp_13
+  position:
+  - 0.30528
+  - -0.1174
+  - -0.37737
+  euler:
+  - 1.21324
+  - -0.69729
+  - -0.81523
+  source:
+  - 20260908_214053_781626/point_025
+  corners_when_sampled: 35
+  expected: visible
+  board_dist_m: 0.684
+- name: wp_14
+  position:
+  - 0.31113
+  - -0.18286
+  - -0.42153
+  euler:
+  - 1.5375
+  - 0.09224
+  - -0.3546
+  source:
+  - 20260908_214053_781626/point_010
+  corners_when_sampled: 23
+  expected: maybe
+  board_dist_m: 0.724
+- name: wp_15
+  position:
+  - 0.32691
+  - -0.22266
+  - -0.40762
+  euler:
+  - 1.30106
+  - -0.44977
+  - -1.18581
+  source:
+  - 20260908_214053_781626/point_026
+  corners_when_sampled: 27
+  expected: maybe
+  board_dist_m: 0.785
+- name: wp_16
+  position:
+  - 0.35088
+  - -0.24619
+  - -0.33615
+  euler:
+  - 1.78084
+  - -0.4079
+  - -1.49761
+  source:
+  - 20260908_214053_781626/point_017
+  corners_when_sampled: 33
+  expected: visible
+  board_dist_m: 0.729
+- name: wp_17
+  position:
+  - 0.35376
+  - -0.33398
+  - -0.31568
+  euler:
+  - -2.15837
+  - -1.26073
+  - -3.06569
+  source:
+  - 20260908_214053_781626/point_007
+  corners_when_sampled: 31
+  expected: visible
+  board_dist_m: 0.5
+- name: wp_18
+  position:
+  - 0.30633
+  - -0.24465
+  - -0.1839
+  euler:
+  - -2.11823
+  - -1.01213
+  - -2.85047
+  source:
+  - 20260908_214053_781626/point_008
+  corners_when_sampled: 34
+  expected: visible
+  board_dist_m: 0.306
+- name: wp_19
+  position:
+  - 0.31967
+  - -0.26613
+  - -0.15021
+  euler:
+  - 1.23346
+  - -1.37807
+  - -0.06358
+  source:
+  - 20260908_214053_781626/point_014
+  corners_when_sampled: 35
+  expected: visible
+  board_dist_m: 0.414
+- name: wp_20
+  position:
+  - 0.37366
+  - -0.17462
+  - -0.23611
+  euler:
+  - 2.31343
+  - -1.0636
+  - -1.78179
+  source:
+  - 20260908_214053_781626/point_021
+  corners_when_sampled: 35
+  expected: visible
+  board_dist_m: 0.555
+- name: wp_21
+  position:
+  - 0.32637
+  - -0.14544
+  - -0.28434
+  euler:
+  - 2.03438
+  - -0.3701
+  - -1.11877
+  source:
+  - 20260908_214053_781626/point_029
+  corners_when_sampled: 35
+  expected: visible
+  board_dist_m: 0.605
+- name: wp_22
+  position:
+  - 0.28496
+  - -0.07152
+  - -0.20785
+  euler:
+  - 1.69072
+  - -0.51181
+  - -0.44644
+  source:
+  - 20260908_214053_781626/point_012
+  corners_when_sampled: 35
+  expected: visible
+  board_dist_m: 0.504
+- name: wp_23
+  position:
+  - 0.24349
+  - -0.08184
+  - -0.16068
+  euler:
+  - 1.19215
+  - -0.20214
+  - -0.19757
+  source:
+  - 20260908_214053_781626/point_024
+  corners_when_sampled: 29
+  expected: maybe
+  board_dist_m: 0.516
+- name: wp_24
+  position:
+  - 0.32536
+  - -0.02882
+  - -0.26851
+  euler:
+  - 1.91691
+  - 0.26265
+  - -0.81964
+  source:
+  - 20260908_214053_781626/point_030
+  corners_when_sampled: 31
+  expected: visible
+  board_dist_m: 0.653
+- name: wp_25
+  position:
+  - 0.36501
+  - -0.0006
+  - -0.2262
+  euler:
+  - -2.99742
+  - -1.2275
+  - -1.78544
+  source:
+  - 20260908_214053_781626/point_015
+  corners_when_sampled: 35
+  expected: visible
+  board_dist_m: 0.383
+- name: wp_26
+  position:
+  - 0.31949
+  - 0.05747
+  - -0.23776
+  euler:
+  - 1.89449
+  - -0.6429
+  - -0.45143
+  source:
+  - 20260908_214053_781626/point_016
+  corners_when_sampled: 35
+  expected: visible
+  board_dist_m: 0.516
+- name: wp_27
+  position:
+  - 0.28943
+  - -0.07265
+  - -0.4704
+  euler:
+  - 1.65976
+  - 0.02188
+  - -0.74262
+  source:
+  - 20260908_214053_781626/point_004
+  corners_when_sampled: 35
+  expected: visible
+  board_dist_m: 0.744
+- name: wp_28
+  position:
+  - 0.22401
+  - -0.21363
+  - -0.38773
+  euler:
+  - 1.54188
+  - -0.37392
+  - -1.3065
+  source:
+  - 20260908_214053_781626/point_018
+  corners_when_sampled: 35
+  expected: visible
+  board_dist_m: 0.69
+- name: wp_29
+  position:
+  - 0.20776
+  - -0.2533
+  - -0.52813
+  euler:
+  - 1.58779
+  - -0.06648
+  - -1.28289
+  source:
+  - 20260908_214053_781626/point_005
+  corners_when_sampled: 26
+  expected: maybe
+  board_dist_m: 0.814
+- name: wp_30
+  position:
+  - 0.25375
+  - -0.36908
+  - -0.45032
+  euler:
+  - 2.12407
+  - -1.2669
+  - -1.57546
+  source:
+  - 20260908_214053_781626/point_006
+  corners_when_sampled: 35
+  expected: visible
+  board_dist_m: 0.644

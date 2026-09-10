@@ -1,1 +1,0 @@
-ament_cmake_symlink_install_targets("TARGET_FILES" "/home/dawntildusk/lbot_ws/build/lbot_teleop/demo_teleop" "TARGETS" "demo_teleop" "DESTINATION" "lib/lbot_teleop")
