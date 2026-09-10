@@ -1,0 +1,36 @@
+{
+  "task_mode": "basic",
+  "roi": [
+    0.0,
+    0.0,
+    1.0,
+    1.0
+  ],
+  "depth_scale_m": 0.001,
+  "max_sync_ms": 20.0,
+  "plane_tolerance_m": 0.004,
+  "min_depth_support": 0.35,
+  "size_relative_tolerance": 0.12,
+  "profiles": {
+    "M45_silver": {
+      "color": "silver",
+      "across_flats_mm": 70.0,
+      "height_mm": null
+    },
+    "M45_black": {
+      "color": "black",
+      "across_flats_mm": 70.0,
+      "height_mm": null
+    },
+    "M33_black": {
+      "color": "black",
+      "across_flats_mm": 50.0,
+      "height_mm": null
+    },
+    "M27_black": {
+      "color": "black",
+      "across_flats_mm": 40.0,
+      "height_mm": null
+    }
+  }
+}
