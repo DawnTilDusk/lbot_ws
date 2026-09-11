@@ -239,6 +239,40 @@ dry-run「交接点核对」超 20mm 标 ⚠。2026-09-10 切换新三段后此�
 若以后三颗要分三个格位：把 yaml 的 `right.place` 从单段改成 `l:/m:/s:` 三段即可，
 此时各 place 段**第 0 点必须就是中央重抓点**，dry-run 会逐段核对。
 
+**右 approach 段按尺寸分段（中小螺母拇指高度不够时）**：approach 与 place 一样支持
+`l:/m:/s:` 三选一写法（2026-09-11 起；仍必须 `hand_after: close`）。大螺母已调好、只改
+中小螺母时，**复制原段文件后只微调副本末点**（三段首点必须一致，dry-run 会检查并警告）：
+
+```bash
+cd /home/lionheart/Project/1_Competition/THUEI/Build_ws/lbot_ws
+# 1) 复制段目录（原段 right_middle_grasp1 保持给大螺母用，不动）
+cp -r recordings/right_middle_grasp1 recordings/right_middle_grasp1_ms
+# 2) 只算不动：副本末点降低 5mm（--dz 米，负值更低；需要俯仰再加 --drx 度），
+#    驱动 IK 多种子求解+FK 复核，关节与 pose 快照一起回写，自动备份 events.jsonl.bak_*
+/usr/bin/python3 tools/retune_waypoint.py \
+  --file recordings/right_middle_grasp1_ms/events.jsonl \
+  --sequence right_grasp_middle1_001 --arm right --dz -0.005
+# 3) 真机低速预览这一段（默认 dry，--execute 才动；先慢速接入起点）
+/usr/bin/python3 tools/replay_workpoints.py \
+  recordings/right_middle_grasp1_ms/events.jsonl \
+  --to right_grasp_middle1_001 --arm right --execute --move-to-start
+```
+
+然后把 yaml 改成三段（m/s 先共用同一副本，以后要分开再复制一个 `_s` 目录）：
+
+```yaml
+right:
+  approach:
+    l: {file: recordings/right_middle_grasp1/events.jsonl,    sequence: right_grasp_middle1_001, hand_after: close}
+    m: {file: recordings/right_middle_grasp1_ms/events.jsonl, sequence: right_grasp_middle1_001, hand_after: close}
+    s: {file: recordings/right_middle_grasp1_ms/events.jsonl, sequence: right_grasp_middle1_001, hand_after: close}
+```
+
+dry-run 段表会列出 3 条 approach、交接点逐尺寸核对；单尺寸首调：
+`nut_pick_place.py --execute --detector ... --order m`（先用 --go-ready 离场）。
+微调每次 2~5mm 小步，retune 默认拒绝与原臂型相差 >25° 的解（防 IK 翻转支），
+需要更大姿态变化时应重新 `record_workpoints` 拖教而不是硬转。
+
 另需 1 个抓取姿态（只用它的三个旋转角，xyz 由视觉覆盖）。`left.grasp_orientation` 两种写法：
 
 1. 位姿库名（默认）：`grasp_orientation: left_grasp_init`，姿态存在 `task_poses.yaml`，
@@ -470,7 +504,7 @@ python3 tools/nut_pick_place.py --detector external --order l
 | `tools/nut_detector_example.py` | 自接检测器模板（只出像素的最简示例） |
 | `开发资源/nut_sort/nut_detector_ref.py` | 固定参考位姿桩（base_link 直给，联调用） |
 | `tools/nut_pick_place.py` | 主流程（默认 dry-run） |
-| `tools/test_nut_task.py` | 离线单测（82 项，含 ready 轨迹接入/无 ready 回退、停顿期持续 spin、关节到位补发+分臂容差+逐关节诊断、视觉笛卡尔位姿核对/补发/指令vs实际报错、速度倍率、记录段姿态源、多种子 IK+对照探针、终端输入检测器、同型号多目标 random/first/abort 策略、缺型号整轮重拍（detect_attempts/missing_retry_seconds）、识别弹窗配置校验、4 段真实任务段加载、共用 place、分臂闭合值、4 种检测结果形式、base 系直给、grasp_offset_xyz 腕部偏移、按尺寸姿态/偏移覆盖与回退、非法值校验） |
+| `tools/test_nut_task.py` | 离线单测（85 项，含 ready 轨迹接入/无 ready 回退、停顿期持续 spin、关节到位补发+分臂容差+逐关节诊断、视觉笛卡尔位姿核对/补发/指令vs实际报错、速度倍率、记录段姿态源、多种子 IK+对照探针、终端输入检测器、同型号多目标 random/first/abort 策略、缺型号整轮重拍（detect_attempts/missing_retry_seconds）、识别弹窗配置校验、4 段真实任务段加载、共用 place、右 approach 按尺寸分段（l/m/s 选段/校验/交接行）、分臂闭合值、4 种检测结果形式、base 系直给、grasp_offset_xyz 腕部偏移、按尺寸姿态/偏移覆盖与回退、非法值校验） |
 | `tools/test_nut_yolo.py` | 深度/内参/ROI/locate 换算 + 重取帧重试 + annotate 画框 + DetectionWindow 弹窗生命周期/按键/超时/headless 降级（22 项） |
 | `tools/test_nut_yolo_live.py` | 配对取帧纯函数：积压跳帧、过期/失配拒绝、坏深度不掩盖另一检测（3 项） |
 
@@ -491,5 +525,5 @@ python3 tools/nut_pick_place.py --detector external --order l
 cd tools
 source /opt/ros/jazzy/setup.bash && source ../install/setup.bash
 /usr/bin/python3 -m pytest test_nut_task.py test_nut_yolo.py test_nut_yolo_live.py -q
-# 当前共 107 项；只用 unittest 也可逐个文件跑
+# 当前共 110 项；只用 unittest 也可逐个文件跑
 ```

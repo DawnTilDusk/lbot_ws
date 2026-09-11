@@ -74,8 +74,8 @@ def parse_order(text):
 def load_all_legs(cfg):
     """加载全部序列段并做跨段一致性检查。
 
-    返回 (left_legs, approach, places, release_leg, ready_left, ready_right)；
-    ready_* 未配置时为 None。place 段三颗共用时 places 三个键指向同一个 Leg 对象。
+    返回 (left_legs, approaches, places, release_leg, ready_left, ready_right)；
+    ready_* 未配置时为 None。approach/place 三颗共用时三个键指向同一个 Leg 对象。
     """
     cache = {}
 
@@ -86,13 +86,14 @@ def load_all_legs(cfg):
         return cache[key]
 
     left_legs = [get('left', s) for s in cfg.left_legs]
-    appr = get('right', cfg.right_approach)
+    apprs = {k: get('right', cfg.right_approaches[k]) for k in SIZE_LABELS}
     places = {k: get('right', cfg.right_place[k]) for k in SIZE_LABELS}
     ready_left = get('left', cfg.left_ready) if cfg.left_ready else None
     ready_right = get('right', cfg.right_ready) if cfg.right_ready else None
 
     sides = {'left': left_legs + ([ready_left] if ready_left else []),
-             'right': [appr] + list(places.values()) + ([ready_right] if ready_right else [])}
+             'right': list(apprs.values()) + list(places.values())
+                      + ([ready_right] if ready_right else [])}
     for side, legs in sides.items():
         ns0, nm0 = legs[0].namespace, legs[0].names
         for leg in legs[1:]:
@@ -102,7 +103,7 @@ def load_all_legs(cfg):
                 raise TaskError(f'{side} 各序列关节名顺序不一致：{legs[0].target} vs {leg.target}')
 
     release_leg = next(leg for leg in left_legs if leg.hand_after == 'open')
-    return left_legs, appr, places, release_leg, ready_left, ready_right
+    return left_legs, apprs, places, release_leg, ready_left, ready_right
 
 
 def validate_detections(cfg, detections):
@@ -190,16 +191,29 @@ def print_leg_table(title, legs, markers=None):
                   f'{mm[2]:+7.1f}] euler=[{deg[0]:+5.0f},{deg[1]:+5.0f},{deg[2]:+5.0f}] {tag}')
 
 
-def handoff_check(release_leg, appr):
-    """关键交接点：左释放点 vs 右 approach 末点(close 处)。只警告不阻塞。"""
-    d = float(np.linalg.norm(release_leg.end_pose['xyz'] - appr.end_pose['xyz']))
-    flag = '⚠ >20mm，右臂可能抓空，建议重录对齐' if d > HANDOFF_WARN_M else 'ok'
-    return [f'    左释放点 vs 右臂重抓点(approach终点): {d*1000:.0f}mm {flag}']
+def handoff_check(release_leg, apprs, approach_shared):
+    """关键交接点：左释放点 vs 右 approach 末点(close 处)。只警告不阻塞。
+
+    approach 按尺寸分段时每个尺寸各报一行（共用段只报一行）。
+    """
+    rows = []
+    for k in SIZE_LABELS:
+        appr = apprs[k]
+        d = float(np.linalg.norm(release_leg.end_pose['xyz'] - appr.end_pose['xyz']))
+        flag = '⚠ >20mm，右臂可能抓空，建议重录/微调对齐' if d > HANDOFF_WARN_M else 'ok'
+        prefix = '左释放点 vs 右臂重抓点(approach终点)' if approach_shared \
+            else f'左释放点 vs 右臂重抓点 approach_{k} 末点'
+        rows.append(f'    {prefix}: {d*1000:.0f}mm {flag}')
+        if approach_shared:
+            break
+    return rows
 
 
-def join_gap_rows(left_legs, appr, places, place_shared, ready_left=None, ready_right=None):
+def join_gap_rows(left_legs, apprs, approach_shared, places, place_shared,
+                  ready_left=None, ready_right=None):
     """框架在相邻段之间自动补的慢速 MoveJ 接入距离（关节空间直动，无避障规划）。"""
     rows = []
+    appr0 = apprs['l']  # 代表段（home/ready 接入以 l 段首点为准）
 
     def gap(tag, a, b, warn_m=0.25):
         d = float(np.linalg.norm(a['xyz'] - b['xyz']))
@@ -213,28 +227,47 @@ def join_gap_rows(left_legs, appr, places, place_shared, ready_left=None, ready_
             ready_left.end_pose, left_legs[0].start_pose, warn_m=0.30)
     if ready_right is not None:
         gap(f'开机 {ready_right.target}末(ready) -> 右臂 approach 首（框架自动 MoveJ 接入）',
-            ready_right.end_pose, appr.start_pose, warn_m=0.30)
+            ready_right.end_pose, appr0.start_pose, warn_m=0.30)
     for i in range(len(left_legs) - 1):
         gap(f'左臂 {left_legs[i].target}末 -> {left_legs[i+1].target}首',
             left_legs[i].end_pose, left_legs[i + 1].start_pose)
     gap(f'左臂 {left_legs[-1].target}末(回位) -> 下轮 {left_legs[0].target}首(home)',
         left_legs[-1].end_pose, left_legs[0].start_pose)
-    any_place = places['l']
-    gap(f'右臂 {appr.target}末(抓螺母) -> place段首',
-        appr.end_pose, any_place.start_pose, warn_m=0.30)
-    tag = 'place段末(释放) -> 下轮 approach首(home)' if place_shared \
-        else 'place_l段末 -> 下轮 approach首(home)'
-    gap(tag, any_place.end_pose, appr.start_pose)
-    if not place_shared:
-        # 三段分立时，各 place 首点应就是中央重抓点
+    if approach_shared:
+        # 共用 approach：一条抓后接入行（place 分立时再逐尺寸对齐核对，沿用旧输出）
+        appr = apprs['l']
+        gap(f'右臂 {appr.target}末(抓螺母) -> place段首',
+            appr.end_pose, places['l'].start_pose, warn_m=0.30)
+        if not place_shared:
+            for k in SIZE_LABELS:
+                d = float(np.linalg.norm(appr.end_pose['xyz'] - places[k].start_pose['xyz']))
+                flag = '⚠ >20mm，中央点没对齐' if d > HANDOFF_WARN_M else 'ok'
+                rows.append(f'    右臂重抓点 vs place_{k}段首: {d*1000:.0f}mm {flag}')
+    else:
+        # approach 按尺寸分段：每尺寸一条自己的抓后接入行
         for k in SIZE_LABELS:
-            d = float(np.linalg.norm(appr.end_pose['xyz'] - places[k].start_pose['xyz']))
-            flag = '⚠ >20mm，中央点没对齐' if d > HANDOFF_WARN_M else 'ok'
-            rows.append(f'    右臂重抓点 vs place_{k}段首: {d*1000:.0f}mm {flag}')
+            appr = apprs[k]
+            gap(f'右臂 {appr.target}末(抓{k}螺母) -> place'
+                + ('段首' if place_shared else f'_{k}段首'),
+                appr.end_pose, places[k].start_pose, warn_m=0.30)
+            if not place_shared:
+                d = float(np.linalg.norm(appr.end_pose['xyz'] - places[k].start_pose['xyz']))
+                flag = '⚠ >20mm，中央点没对齐' if d > HANDOFF_WARN_M else 'ok'
+                rows.append(f'    右臂 approach_{k} 重抓点 vs place_{k}段首: '
+                            f'{d*1000:.0f}mm {flag}')
+    gap('place段末(释放) -> 下轮 approach首(home)',
+        places['l'].end_pose, appr0.start_pose)
+    if not approach_shared:
+        # 三段首点理论上应一致（复制原段只改末点）；不一致时每轮换段会多一条直 MoveJ
+        for k in SIZE_LABELS:
+            d = float(np.linalg.norm(appr0.start_pose['xyz'] - apprs[k].start_pose['xyz']))
+            if d > 1e-6:
+                flag = '⚠ 三 approach 首点不一致，换尺寸时框架自动 MoveJ 接入，确认路径无干涉'
+                rows.append(f'    approach_l 首点 vs approach_{k} 首点: {d*1000:.0f}mm {flag}')
     return rows
 
 
-def print_plan(cfg, store, left_legs, appr, places, release_leg, detections, R_BTC, t_BTC,
+def print_plan(cfg, store, left_legs, apprs, places, release_leg, detections, R_BTC, t_BTC,
                grasp_poses=None, ready_left=None, ready_right=None):
     """grasp_poses: {l/m/s: (eul_rad|None, 来源说明)}，由 resolve_grasp_eulers 得到。"""
     grasp_poses = grasp_poses or {}
@@ -247,7 +280,7 @@ def print_plan(cfg, store, left_legs, appr, places, release_leg, detections, R_B
     print('-' * 78)
     print('  【开机 ready 段】上使能 + 张开初始手型后逐点 MoveJ 回放，末点=视觉检测时的离场 ready 位：')
     for arm_cn, ready, fallback in (('左', ready_left, left_legs[0]),
-                                    ('右', ready_right, appr)):
+                                    ('右', ready_right, apprs['l'])):
         if ready is None:
             print(f'    {arm_cn}臂：未配 ready 段，开机直接慢速 MoveJ 到任务段 '
                   f'{fallback.target} pt0')
@@ -255,11 +288,21 @@ def print_plan(cfg, store, left_legs, appr, places, release_leg, detections, R_B
             print_leg_table(f'{arm_cn}臂 ready：', [ready],
                             {id(ready): {len(ready.joints) - 1: '<- READY 检测时停在这'}})
     lm = {id(left_legs[0]): {0: '<- 任务段首点（retreat home）'}}
-    rm = {id(appr): {0: '<- 任务段首点（retreat home）'}}
     rlm = {id(release_leg): {len(release_leg.joints) - 1: '<- 中央释放点'}}
     print_leg_table('【左臂固定段】视觉抓起后依次回放：', left_legs,
                     {**lm, **rlm})
-    print_leg_table('【右臂固定段】approach（每颗都回放，末点闭合重抓）：', [appr], rm)
+    if cfg.approach_shared:
+        appr = apprs['l']
+        am = {id(appr): {0: '<- 任务段首点（retreat home）'}}
+        print_leg_table('【右臂固定段】approach（三颗共用，回放末点闭合重抓）：', [appr], am)
+    else:
+        am = {}
+        for k in SIZE_LABELS:
+            leg = apprs[k]
+            am[id(leg)] = {0: '<- 任务段首点（retreat home）',
+                           len(leg.joints) - 1: f'<- 中央重抓{k}螺母（CLOSE）'}
+        print_leg_table('【右臂固定段】approach（按尺寸三选一，回放末点闭合重抓）：',
+                        [apprs[k] for k in SIZE_LABELS], am)
     if cfg.place_shared:
         shared = places['l']
         print_leg_table('【右臂固定段】place（三颗共用一条）：', [shared],
@@ -273,11 +316,11 @@ def print_plan(cfg, store, left_legs, appr, places, release_leg, detections, R_B
         print_leg_table('【右臂固定段】place（按尺寸三选一）：',
                         list(places.values()), place_markers)
     print('  【交接点核对】')
-    for row in handoff_check(release_leg, appr):
+    for row in handoff_check(release_leg, apprs, cfg.approach_shared):
         print(row)
     print('  【段间接入距离】相邻段端点不一致时，框架以慢速 MoveJ 直动接入：')
-    for row in join_gap_rows(left_legs, appr, places, cfg.place_shared,
-                             ready_left, ready_right):
+    for row in join_gap_rows(left_legs, apprs, cfg.approach_shared, places,
+                             cfg.place_shared, ready_left, ready_right):
         print(row)
 
     tol_txt = f'到位容差 {cfg.reached_tolerance}rad'
@@ -424,15 +467,19 @@ def load_transforms(cfg):
 
 # ---------------- 实机执行 ---------------------------------------------------
 
-def initial_poses(cfg, runner, left_legs, appr, left, right,
+def initial_poses(cfg, runner, left_legs, apprs, left, right,
                   ready_left=None, ready_right=None):
-    """步骤0：注册 retreat home，双臂按预录 ready 轨迹离场（未配 ready 则直接补到任务段 pt0）。"""
+    """步骤0：注册 retreat home，双臂按预录 ready 轨迹离场（未配 ready 则直接补到任务段 pt0）。
+
+    右臂 home/ready 接入以代表段 approach_l 的首点为准（分段复制时三段首点应一致）。
+    """
     import time
+    appr0 = apprs['l']
     print('步骤0：双臂先回 ready（预录轨迹），再离场检测...')
     runner.set_home('left', left_legs[0].joints[0])
-    runner.set_home('right', appr.joints[0])
+    runner.set_home('right', appr0.joints[0])
     for arm, rc, ready, fallback in (('左', left, ready_left, left_legs[0]),
-                                     ('右', right, ready_right, appr)):
+                                     ('右', right, ready_right, appr0)):
         if ready is not None:
             leg, tgt = ready, ready.poses[-1]['xyz']
             print(f'  {arm}臂：回放 ready 段 {leg.target}'
@@ -458,7 +505,7 @@ def initial_poses(cfg, runner, left_legs, appr, left, right,
 
 
 def run_one_nut(cfg, runner, left, right, label, det, eul_left, R_BTC, t_BTC,
-                left_legs, appr, places):
+                left_legs, apprs, places):
     pb_raw, pb, hover, down = grasp_points(cfg, det, R_BTC, t_BTC)
 
     def dwell(sec, what):
@@ -489,7 +536,8 @@ def run_one_nut(cfg, runner, left, right, label, det, eul_left, R_BTC, t_BTC,
         runner.run_leg(leg)
         dwell(cfg.between_leg_seconds, '左臂段间')
 
-    print(f'  [右] 回放段 {appr.target}（段尾重抓{SIZE_NAMES_CN[label]}螺母）')
+    appr = apprs[label]
+    print(f'  [右] 回放段 {appr.target}（按尺寸选段，段尾重抓{SIZE_NAMES_CN[label]}螺母）')
     runner.run_leg(appr, label=label)
     dwell(cfg.between_leg_seconds, '右臂段间')
 
@@ -498,7 +546,7 @@ def run_one_nut(cfg, runner, left, right, label, det, eul_left, R_BTC, t_BTC,
     runner.run_leg(leg)
 
 
-def go_ready(cfg, left_legs, appr, ready_left=None, ready_right=None):
+def go_ready(cfg, left_legs, apprs, ready_left=None, ready_right=None):
     """只做开机动作：使能 -> 张开初始手型 -> 双臂按 ready 轨迹离场，然后退出（调试用）。"""
     import rclpy
     from nut_robot import RobotClient
@@ -523,7 +571,7 @@ def go_ready(cfg, left_legs, appr, ready_left=None, ready_right=None):
             rc.hand_open(cfg.hand_open_vals)
         import time
         time.sleep(1.0)
-        initial_poses(cfg, runner, left_legs, appr, left, right,
+        initial_poses(cfg, runner, left_legs, apprs, left, right,
                       ready_left, ready_right)
         print('双臂已在 ready，--go-ready 结束（不执行抓放）。')
     finally:
@@ -558,7 +606,7 @@ def ik_diagnose(robot, seed_leg, fail_pt, fail_eul):
     return rows
 
 
-def execute(cfg, store, R_BTC, t_BTC, K, left_legs, appr, places, release_leg,
+def execute(cfg, store, R_BTC, t_BTC, K, left_legs, apprs, places, release_leg,
             grasp_poses, ready_left=None, ready_right=None):
     """grasp_poses: {l/m/s: (eul_rad, 来源说明)}；调用前 main 已保证 order 内尺寸都可用。"""
     import rclpy
@@ -589,7 +637,7 @@ def execute(cfg, store, R_BTC, t_BTC, K, left_legs, appr, places, release_leg,
         time.sleep(1.0)  # 等手指张开动作完成再动臂
 
         # 先按预录 ready 轨迹离场，再拍视觉快照
-        initial_poses(cfg, runner, left_legs, appr, left, right,
+        initial_poses(cfg, runner, left_legs, apprs, left, right,
                       ready_left, ready_right)
         print(f'双臂已离场，开始视觉检测（{cfg.detector_type}），需要顺序：'
               f'{"".join(cfg.order)} ...')
@@ -648,7 +696,7 @@ def execute(cfg, store, R_BTC, t_BTC, K, left_legs, appr, places, release_leg,
                           f'left.grasp_orientation_by_size.{label} / left.grasp_orientation 姿态。')
         if first_fail is None:
             print('视觉点全部可达，开始抓放。')
-        print_plan(cfg, store, left_legs, appr, places, release_leg,
+        print_plan(cfg, store, left_legs, apprs, places, release_leg,
                    detections, R_BTC, t_BTC, grasp_poses=grasp_poses,
                    ready_left=ready_left, ready_right=ready_right)
 
@@ -656,7 +704,7 @@ def execute(cfg, store, R_BTC, t_BTC, K, left_legs, appr, places, release_leg,
         for idx, label in enumerate(remaining):
             det = by_label[label]
             run_one_nut(cfg, runner, left, right, label, det, grasp_poses[label][0],
-                        R_BTC, t_BTC, left_legs, appr, places)
+                        R_BTC, t_BTC, left_legs, apprs, places)
             if idx < len(remaining) - 1:
                 print(f'  螺母之间停顿 {cfg.between_leg_seconds:.1f}s，'
                       f'下一颗 {SIZE_NAMES_CN[remaining[idx + 1]]}...')
@@ -709,7 +757,7 @@ def main():
                       '首调请谨慎，手持急停')
         store = PoseStore(cfg.poses_path)
         R, t, K = load_transforms(cfg)
-        left_legs, appr, places, release_leg, ready_left, ready_right = load_all_legs(cfg)
+        left_legs, apprs, places, release_leg, ready_left, ready_right = load_all_legs(cfg)
 
         # 三个尺寸的姿态源各自解析（不可用的为 (None, 原因)：dry-run 只警告，--execute 硬中止）
         grasp_poses = resolve_grasp_eulers(cfg, store)
@@ -717,7 +765,7 @@ def main():
         if args.go_ready:
             if not args.execute:
                 raise TaskError('--go-ready 是真机动作，必须与 --execute 一起用')
-            go_ready(cfg, left_legs, appr, ready_left, ready_right)
+            go_ready(cfg, left_legs, apprs, ready_left, ready_right)
         elif args.execute:
             missing = [(k, grasp_poses[k][1]) for k in cfg.order
                        if grasp_poses.get(k, (None, ''))[0] is None]
@@ -729,7 +777,7 @@ def main():
                     '或把 left.grasp_orientation(_by_size.<尺寸>) 改成 '
                     '{file?, sequence, point?} 指向记录段')
             # 执行前仍打印骨架与交接点核对（检测点到位后再补打印）
-            execute(cfg, store, R, t, K, left_legs, appr, places, release_leg,
+            execute(cfg, store, R, t, K, left_legs, apprs, places, release_leg,
                     grasp_poses, ready_left, ready_right)
         else:
             detections = []
@@ -742,7 +790,7 @@ def main():
                 detector = build_detector(cfg, None, K)
                 detections, _ = detect_until_complete(
                     cfg, lambda: detector.detect(cfg.order))
-            print_plan(cfg, store, left_legs, appr, places, release_leg,
+            print_plan(cfg, store, left_legs, apprs, places, release_leg,
                        detections, R, t, grasp_poses=grasp_poses,
                        ready_left=ready_left, ready_right=ready_right)
             print('\n[dry-run] 未驱动机器人。确认段表/交接点/抓取点后加 --execute 真机执行。')

@@ -113,27 +113,60 @@ class ConfigAndLegsTest(unittest.TestCase):
         f1, t1, h1, r1 = self.cfg.left_legs[1]
         self.assertEqual((t1, h1, r1), ('left_place1_002', 'open', True))
         self.assertEqual(f1, LEFT_TRACE)
+        self.assertTrue(self.cfg.approach_shared)
         self.assertEqual(self.cfg.right_approach[1:], ('right_ready1_001', 'close', False))
         for k in SIZE_LABELS:
+            self.assertIs(self.cfg.right_approaches[k], self.cfg.right_approach)
             self.assertEqual(self.cfg.right_place[k][2], 'open')
             self.assertTrue(self.cfg.right_place[k][3])
+
+    def test_approach_by_size_parses_and_validates(self):
+        def mapping(y):
+            y['right']['approach'] = {
+                'l': {'sequence': 'right_ready1_001', 'hand_after': 'close'},
+                'm': {'sequence': 'right_appr_m_002', 'hand_after': 'close'},
+                's': {'sequence': 'right_appr_s_003', 'hand_after': 'close'}}
+        cfg = self._reload(mapping)
+        self.assertFalse(cfg.approach_shared)
+        self.assertEqual([cfg.right_approaches[k][1] for k in SIZE_LABELS],
+                         ['right_ready1_001', 'right_appr_m_002', 'right_appr_s_003'])
+        self.assertIs(cfg.right_approach, cfg.right_approaches['l'])  # 代表段=home
+
+        def missing_s(y):
+            y['right']['approach'] = {
+                'l': {'sequence': 'right_ready1_001', 'hand_after': 'close'},
+                'm': {'sequence': 'right_appr_m_002', 'hand_after': 'close'}}
+        with self.assertRaises(TaskError):
+            self._reload(missing_s)
+
+        def not_close(y):
+            y['right']['approach'] = {
+                k: {'sequence': 'right_ready1_001', 'hand_after': 'open'}
+                for k in SIZE_LABELS}
+        with self.assertRaises(TaskError):
+            self._reload(not_close)
+
+        def bad_type(y):
+            y['right']['approach'] = ['right_ready1_001']
+        with self.assertRaises(TaskError):
+            self._reload(bad_type)
 
     def test_ready_optional_when_unconfigured(self):
         self.assertIsNone(self.cfg.left_ready)
         self.assertIsNone(self.cfg.right_ready)
 
     def test_load_all_legs_real_traces(self):
-        left_legs, appr, places, release, ready_left, ready_right = load_all_legs(self.cfg)
+        left_legs, apprs, places, release, ready_left, ready_right = load_all_legs(self.cfg)
         self.assertIsNone(ready_left)
         self.assertIsNone(ready_right)
         self.assertEqual([l.target for l in left_legs],
                          ['left_ready1_001', 'left_place1_002'])
         self.assertIs(release, left_legs[1])
-        self.assertEqual(appr.target, 'right_ready1_001')
-        self.assertEqual(appr.hand_after, 'close')
+        self.assertEqual(apprs['l'].target, 'right_ready1_001')
+        self.assertEqual(apprs['l'].hand_after, 'close')
         self.assertEqual([places[k].target for k in SIZE_LABELS],
                          ['right_place1_002', 'right_place2_003', 'right_place3_004'])
-        for leg in left_legs + [appr] + list(places.values()):
+        for leg in left_legs + list(apprs.values()) + list(places.values()):
             self.assertEqual(leg.joints.shape[1], 7)
             self.assertGreaterEqual(len(leg.joints), 2)
             self.assertEqual(leg.namespace, '/robot1')
@@ -594,28 +627,51 @@ class SharedPlaceRealRecordingTest(unittest.TestCase):
         self.assertEqual(self.cfg.left_legs[0][2], 'open')
         self.assertEqual(self.cfg.left_legs[1][1], 'left_middle_back_001')
         self.assertIsNone(self.cfg.left_legs[1][2])
+        self.assertTrue(self.cfg.approach_shared)
         self.assertEqual(self.cfg.right_approach[1:3],
                          ('right_grasp_middle_001', 'close'))
+        self.assertIs(self.cfg.right_approaches['m'], self.cfg.right_approach)
 
     def test_load_shared_legs(self):
-        left_legs, appr, places, release, ready_left, ready_right = load_all_legs(self.cfg)
+        left_legs, apprs, places, release, ready_left, ready_right = load_all_legs(self.cfg)
         self.assertEqual(len(left_legs), 2)
         self.assertIs(release, left_legs[0])
         self.assertEqual([l.target for l in left_legs],
                          ['left_grasp_place_middle_001', 'left_middle_back_001'])
+        self.assertIs(apprs['l'], apprs['m'])
+        self.assertIs(apprs['m'], apprs['s'])
+        self.assertEqual(apprs['l'].target, 'right_grasp_middle_001')
         self.assertIs(places['l'], places['m'])
         self.assertIs(places['m'], places['s'])
         self.assertEqual(places['l'].target, 'right_middle_back_001')
         self.assertEqual(ready_left.target, 'left_ready1_001')
         self.assertEqual(ready_right.target, 'right_ready1_001')
 
+    def test_load_per_size_approaches(self):
+        def m(y):
+            spec = {'sequence': 'right_grasp_middle_001', 'hand_after': 'close'}
+            y['right']['approach'] = {'l': dict(spec), 'm': dict(spec), 's': dict(spec)}
+        cfg = self._reload_shared(m)
+        self.assertFalse(cfg.approach_shared)
+        left_legs, apprs, places, release, _, _ = load_all_legs(cfg)
+        for k in SIZE_LABELS:
+            self.assertEqual(apprs[k].target, 'right_grasp_middle_001')
+            self.assertEqual(apprs[k].hand_after, 'close')
+        rows = handoff_check(release, apprs, False)
+        self.assertEqual(len(rows), 3)  # 每尺寸各一行
+        self.assertTrue(all(f'approach_{k} 末点' in r for k, r in zip(SIZE_LABELS, rows)))
+        gap = join_gap_rows(left_legs, apprs, False, places, True)  # 无 ready
+        # 三段是同一序列复制时，首点一致，不应有首点不一致警告
+        self.assertFalse(any('首点不一致' in r for r in gap))
+
     def test_real_handoff_gap_reported(self):
-        left_legs, appr, places, release, ready_left, ready_right = load_all_legs(self.cfg)
-        row = handoff_check(release, appr)[0]
+        left_legs, apprs, places, release, ready_left, ready_right = load_all_legs(self.cfg)
+        row = handoff_check(release, apprs, True)[0]
         # right_grasp_middle 末点 2026-09-10 抬高 3cm（-337.7→-307.7mm）后，交接差 69→80mm
         self.assertIn('80mm', row)
         self.assertIn('⚠', row)
-        rows = join_gap_rows(left_legs, appr, places, True, ready_left, ready_right)
+        rows = join_gap_rows(left_legs, apprs, True, places, True,
+                             ready_left, ready_right)
         # 开机 ready 两行 + 左段间接入/左臂回环/右臂抓后抬离/右臂回环 = 6 行
         self.assertEqual(len(rows), 6)
         self.assertTrue(any('place段首' in r for r in rows))
@@ -626,8 +682,8 @@ class SharedPlaceRealRecordingTest(unittest.TestCase):
 
     def test_join_rows_without_ready_stays_four(self):
         # 不配 ready 段时不增加开机行（旧行为）
-        left_legs, appr, places, _, _, _ = load_all_legs(self.cfg)
-        rows = join_gap_rows(left_legs, appr, places, True)
+        left_legs, apprs, places, _, _, _ = load_all_legs(self.cfg)
+        rows = join_gap_rows(left_legs, apprs, True, places, True)
         self.assertEqual(len(rows), 4)
 
     def _reload_shared(self, mutate):
@@ -832,19 +888,27 @@ class PureLogicTest(unittest.TestCase):
     def test_handoff_check_flags_gap(self):
         release = _fake_leg((0.40, 0.05, -0.36))
         appr = _fake_leg((0.42, -0.20, -0.18))
-        self.assertIn('⚠', handoff_check(release, appr)[0])
+        apprs = {k: appr for k in SIZE_LABELS}
+        self.assertIn('⚠', handoff_check(release, apprs, True)[0])
+        # 分段模式：每个尺寸各报一行
+        rows = handoff_check(release, apprs, False)
+        self.assertEqual(len(rows), 3)
+        self.assertTrue(all('⚠' in r for r in rows))
 
     def test_handoff_check_ok_aligned(self):
         p = (0.40, 0.05, -0.36)
-        self.assertIn('ok', handoff_check(_fake_leg(p), _fake_leg(p))[0])
+        leg = _fake_leg(p)
+        self.assertIn('ok', handoff_check(_fake_leg(p),
+                                          {k: leg for k in SIZE_LABELS}, True)[0])
 
     def test_persize_place_start_alignment_rows(self):
         # 分立 place 模式：各 place 段起点应对齐右臂重抓点
         center = (0.42, -0.15, -0.24)
         appr = _fake_leg(center)
+        apprs = {k: appr for k in SIZE_LABELS}
         places = {k: _fake_leg((0.5, -0.35, -0.20), xyz_start=center)
                   for k in SIZE_LABELS}
-        rows = join_gap_rows([_fake_leg((0.5, 0.4, -0.2))], appr, places, False)
+        rows = join_gap_rows([_fake_leg((0.5, 0.4, -0.2))], apprs, True, places, False)
         per = [r for r in rows if 'place_' in r and '段首' in r]
         self.assertEqual(len(per), 3)
         self.assertTrue(all('ok' in r for r in per))
@@ -852,9 +916,22 @@ class PureLogicTest(unittest.TestCase):
         places_bad = {k: _fake_leg((0.5, -0.35, -0.20),
                                    xyz_start=(0.5, -0.0, -0.2))
                       for k in SIZE_LABELS}
-        rows = join_gap_rows([_fake_leg((0.5, 0.4, -0.2))], appr, places_bad, False)
+        rows = join_gap_rows([_fake_leg((0.5, 0.4, -0.2))], apprs, True, places_bad, False)
         per = [r for r in rows if 'place_' in r and '段首' in r]
         self.assertTrue(all('⚠' in r for r in per))
+
+    def test_persize_approach_start_mismatch_warns(self):
+        # approach 三段首点不一致时（没走"复制只改末点"流程）要显式警告
+        a0 = _fake_leg((0.42, -0.15, -0.24))
+        apprs = {'l': a0,
+                 'm': _fake_leg((0.42, -0.15, -0.24),
+                                xyz_start=(0.30, -0.10, -0.10)),
+                 's': a0}
+        places = {k: _fake_leg((0.5, -0.35, -0.20)) for k in SIZE_LABELS}
+        rows = join_gap_rows([_fake_leg((0.5, 0.4, -0.2))], apprs, False, places, True)
+        warn = [r for r in rows if '首点不一致' in r]
+        self.assertEqual(len(warn), 1)
+        self.assertIn('approach_m', warn[0])
 
     def test_dwell_keeps_spinning(self):
         # 回归：停顿期间必须持续 spin 节点，否则反馈时间戳老化 >state_timeout 被误判过期

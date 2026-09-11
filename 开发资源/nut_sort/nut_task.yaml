@@ -58,11 +58,25 @@ right:
   trace: recordings/right_grasp_middle/events.jsonl
   # 开机 ready 段（同左臂）：right_trace 里的 right_ready1_001，末点离场
   ready: {file: recordings/right_trace/events.jsonl, sequence: right_ready1_001}
-  approach: {file: recordings/right_middle_grasp1/events.jsonl,
-             sequence: right_grasp_middle1_001, hand_after: close}
+  # 中央重抓段：home -> 桌面中央，段尾 CLOSE 重抓。
+  # 单段写法=三颗共用（当前）。中小螺母拇指高度不够时改按尺寸三选一：
+  #   先 cp -r recordings/right_middle_grasp1 recordings/right_middle_grasp1_ms，
+  #   用 retune_waypoint.py 只调副本末点（--dz 负值=更低，可加 --drx 俯仰），再写：
+  approach:
+    l: {file: recordings/right_middle_grasp1/events.jsonl, sequence: right_grasp_middle1_001, hand_after: close}
+    m: {file: recordings/right_middle_grasp1_m/events.jsonl, sequence: right_grasp_middle1_001, hand_after: close}
+    s: {file: recordings/right_middle_grasp1_s/events.jsonl, sequence: right_grasp_middle1_001, hand_after: close}
+  # 注意三段首点应保持一致（复制只改末点即可）；dry-run 的交接点/段间接入行会逐尺寸报告。
+  # approach: {file: recordings/right_middle_grasp1/events.jsonl,
+  #            sequence: right_grasp_middle1_001, hand_after: close}
   # 三颗放回同一位置：place 直接写单段；若三颗各放各格则写成 l:/m:/s: 三段
-  place: {file: recordings/right_middle_back1/events.jsonl,
-          sequence: right_grasp_move1_001, hand_after: open}
+  # place: {file: recordings/right_middle_back1/events.jsonl,
+          # sequence: right_grasp_move1_001, hand_after: open}
+  place:
+    l: {file: recordings/right_middle_back1/events.jsonl,    sequence: right_grasp_move1_001, hand_after: open}
+    m: {file: recordings/right_middle_back1_m/events.jsonl, sequence: right_grasp_move1_001, hand_after: open}
+    s: {file: recordings/right_middle_back1_s/events.jsonl, sequence: right_grasp_move1_001, hand_after: open}
+
 
 # ---- 运动参数 ----
 motion:

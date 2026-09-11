@@ -158,9 +158,32 @@ class TaskConfig:
         appr = right.get('approach')
         if not appr:
             raise TaskError('right.approach 必填（home->中央，段尾 close 重抓）')
-        self.right_approach = _parse_leg_spec('right', appr, right_trace)
-        if self.right_approach[2] != 'close':
-            raise TaskError('右臂 approach 段必须 hand_after: close（到中央后重抓）')
+
+        def _parse_approach(raw, where):
+            leg = _parse_leg_spec('right', raw, right_trace)
+            if leg[2] != 'close':
+                raise TaskError(f'右臂 {where} 必须 hand_after: close（到中央后重抓）')
+            return leg
+
+        if isinstance(appr, dict) and 'sequence' in appr:
+            # 三颗共用一条 approach 段（单段写法，向后兼容）
+            leg = _parse_approach(appr, 'approach 段')
+            self.approach_shared = True
+            self.right_approaches = {k: leg for k in SIZE_LABELS}
+            self.right_approach = leg
+        elif isinstance(appr, dict):
+            # 按尺寸分别给中央重抓段（中小螺母拇指高度不同时各调各的末点）
+            self.approach_shared = False
+            self.right_approaches = {}
+            for k in SIZE_LABELS:
+                raw = appr.get(k)
+                if raw is None:
+                    raise TaskError(f'right.approach.{k} 未配置（该尺寸中央重放走哪条序列段？'
+                                    f'三颗相同也可直接把 approach 写成单段）')
+                self.right_approaches[k] = _parse_approach(raw, f'approach.{k} 段')
+            self.right_approach = self.right_approaches['l']  # 代表段：home/ready 接入
+        else:
+            raise TaskError('right.approach 必须是段映射（含 sequence）或 l/m/s 三段映射')
         self.right_ready = _parse_ready_spec('right', right.get('ready'), right_trace)
         place = right.get('place', {}) or {}
         self.right_place = {}
