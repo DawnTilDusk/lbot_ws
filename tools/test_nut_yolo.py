@@ -1,9 +1,100 @@
+import time
 import unittest
 import numpy as np
-from nut_yolo import locate
+from nut_yolo import locate, resolve_records
 from nut_robot import TaskError
 from nut_pick_place import det_base_xyz, validate_detections
 from types import SimpleNamespace
+
+
+def _pair(age_s=0.0, tag=0):
+    """合成 (color, depth) 配对帧；帧结构 (消息戳, 接收 monotonic, frame)。"""
+    mono = time.monotonic() - age_s
+    return ((float(tag), mono, np.full((4, 4, 3), tag, np.uint8)),
+            (float(tag), mono, np.full((4, 4), 0.5, np.float32)))
+
+
+class ResolveRecordsRetryTests(unittest.TestCase):
+    def test_fresh_first_attempt_runs_infer_once(self):
+        pair0 = _pair(0.0)
+        calls = []
+        records, pair = resolve_records(
+            {'max_result_age': 10},
+            lambda timeout: pair0,
+            lambda img: calls.append(img) or [{'label': 'm'}],
+            log=lambda *_: None)
+        self.assertEqual(records, [{'label': 'm'}])
+        self.assertEqual(len(calls), 1)
+        self.assertIs(calls[0], pair0[0][2])
+        self.assertIs(pair, pair0)
+
+    def test_stale_snapshot_retries_with_fresh_pair(self):
+        pairs = [_pair(age_s=30, tag=1), _pair(age_s=0, tag=2)]
+        used_frames, waits = [], []
+
+        def wait_pair(timeout):
+            waits.append(timeout)
+            return pairs.pop(0)
+
+        def run_infer(img):
+            used_frames.append(int(img[0, 0, 0]))
+            return [{'label': 'l'}]
+
+        records, pair = resolve_records({'max_result_age': 10}, wait_pair, run_infer,
+                                        log=lambda *_: None)
+        self.assertEqual(used_frames, [1, 2])          # 旧帧丢弃，用新帧重新识别
+        self.assertEqual(int(pair[0][2][0, 0, 0]), 2)  # 返回的是第二次的配对
+        self.assertEqual(len(waits), 2)
+
+    def test_inference_failure_retries_then_succeeds(self):
+        pairs = iter([_pair(0, 1), _pair(0, 2)])
+        attempts = {'n': 0}
+
+        def run_infer(img):
+            attempts['n'] += 1
+            if attempts['n'] == 1:
+                raise TaskError('YOLO 推理失败：超时')
+            return [{'label': 's'}]
+
+        records, _ = resolve_records({'max_result_age': 10},
+                                     lambda timeout: next(pairs), run_infer,
+                                     log=lambda *_: None)
+        self.assertEqual(records, [{'label': 's'}])
+        self.assertEqual(attempts['n'], 2)
+
+    def test_all_stale_aborts_after_three_attempts_by_default(self):
+        calls = {'wait': 0, 'infer': 0}
+
+        def wait_pair(timeout):
+            calls['wait'] += 1
+            return _pair(age_s=99)
+
+        def run_infer(img):
+            calls['infer'] += 1
+            return []
+
+        with self.assertRaises(TaskError):
+            resolve_records({'max_result_age': 10}, wait_pair, run_infer,
+                            log=lambda *_: None)
+        self.assertEqual(calls, {'wait': 3, 'infer': 3})
+
+    def test_attempt_cap_configurable(self):
+        calls = {'n': 0}
+        with self.assertRaises(TaskError):
+            resolve_records({'max_result_age': 10, 'inference_retries': 1},
+                            lambda timeout: _pair(age_s=99),
+                            lambda img: (calls.__setitem__('n', calls['n'] + 1), []),
+                            log=lambda *_: None)
+        self.assertEqual(calls['n'], 1)
+
+    def test_frame_timeout_aborts_immediately_without_inference(self):
+        infer_calls = [0]
+        with self.assertRaises(TaskError):
+            resolve_records({'max_result_age': 10},
+                            lambda timeout: None,
+                            lambda img: infer_calls.__setitem__(0, infer_calls[0] + 1),
+                            log=lambda *_: None)
+        self.assertEqual(infer_calls[0], 0)
 
 
 class CoordinateTests(unittest.TestCase):

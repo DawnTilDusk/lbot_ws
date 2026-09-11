@@ -109,7 +109,7 @@ hand:
   # 各臂闭合默认值（2026-09-10 现场给定，三颗螺母先共用；当晚小拇指也改为闭合 0，原 255 为张开）
   close:
     left:  [0, 40, 0, 0, 0, 0]
-    right: [0, 0, 0, 0, 0, 0]  # 与左臂相同（侧摆 0、弯曲 40；原 80 弯曲已弃用）
+    right: [0, 0, 0, 0, 0, 0]  # 右臂六路全闭（现场调定值；左拇指弯曲保留 40）
   # 若某尺寸要单独手型，按尺寸覆盖（优先级高于 close），三种写法：
   # sizes:
   #   l: {joint: [180, 180, 180, 180, 180, 180]}          # 双臂共用
@@ -147,6 +147,9 @@ detector:
   max_frame_age: 1.0
   max_skew: 0.1
   max_result_age: 10
+  # 推理后帧龄超过 max_result_age（CPU 冷启动偶发）或单次推理失败时，
+  # 丢弃旧帧、重新取一对新帧重发识别，最多 inference_retries 次后才中止
+  inference_retries: 3
   roi: null  # 可选：原图工作区 [xmin, ymin, xmax, ymax]；仅保留中心位于区内的检测
   json_path: detections.json
   params: 开发资源/nut_sort/nut_vision.yaml

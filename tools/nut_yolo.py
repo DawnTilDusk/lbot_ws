@@ -76,6 +76,40 @@ def locate(records, depth, K, image_shape, cfg):
     return out
 
 
+def resolve_records(cfg, wait_pair, run_infer, log=print):
+    """「取一对最新同步帧 -> YOLO 推理」循环，快照过期或推理失败就重取重识别。
+
+    wait_pair(timeout) -> pair=(color_tuple, depth_tuple) 或 None（取帧超时）；
+      帧元组第 2 项是本机接收 monotonic，帧结构 (消息戳, monotonic, frame)。
+    run_infer(color_frame) -> records（推理子进程失败可抛 TaskError，按重试处理）。
+    每次重试前由 wait_pair 负责清空缓存，保证拿到的是本次推理后的新帧。
+    重试次数 detector.inference_retries（缺省 3）；快照年龄上限 max_result_age 秒。
+    """
+    retries = max(1, int(cfg.get('inference_retries', 3)))
+    max_result_age = float(cfg.get('max_result_age', 10))
+    last_err = None
+    for attempt in range(1, retries + 1):
+        pair = wait_pair(float(cfg.get('camera_timeout', 10)))
+        if pair is None:
+            raise TaskError('等待彩色、对齐深度、彩色 camera_info 超时，或图像时间戳不同步')
+        c, d = pair
+        try:
+            records = run_infer(c[2])
+        except TaskError as exc:  # 推理子进程失败/超时：重新发识别指令
+            last_err = exc
+            print(f'  第 {attempt}/{retries} 次识别失败（{exc}），重新取帧识别...')
+            continue
+        age = time.monotonic() - min(c[1], d[1])
+        if age <= max_result_age:
+            return records, pair
+        print(f'  第 {attempt}/{retries} 次推理完成但快照已过期'
+              f'（帧龄 {age:.1f}s > {max_result_age:g}s，CPU 冷启动模型常见），'
+              f'丢弃旧帧重新取帧识别...')
+    detail = str(last_err) if last_err is not None else f'快照连续过期（>{max_result_age:g}s）'
+    raise TaskError(f'YOLO 连续 {retries} 次识别未成功，中止（最后原因：{detail}）。'
+                    f'可调大 detector.max_result_age / inference_timeout，或检查 CPU 负载')
+
+
 class YoloDetector:
     def __init__(self, node, sub_cfg, K=None):
         self.node = node
@@ -116,28 +150,28 @@ class YoloDetector:
                                              lambda m: receive(m, depth, 'passthrough'), qos_profile_sensor_data),
                 self.node.create_subscription(CameraInfo, vision['color_info_topic'], info, qos_profile_sensor_data)]
         try:
-            end = time.monotonic()+float(self.cfg.get('camera_timeout', 10))
-            pair = None
-            while time.monotonic() < end:
-                rclpy.spin_once(self.node, timeout_sec=.05)
-                now = time.monotonic()
-                pairs = [(c,d) for c in color for d in depth
-                         if now-c[1] <= max_age and now-d[1] <= max_age and abs(c[0]-d[0]) <= skew]
-                if pairs and camera:
-                    pair = min(pairs, key=lambda x: abs(x[0][0]-x[1][0]))
-                    break
-            if pair is None:
-                raise TaskError('等待彩色、对齐深度、彩色 camera_info 超时，或图像时间戳不同步')
-            c,d = pair
-            if (camera['height'],camera['width']) != c[2].shape[:2]:
-                raise TaskError('camera_info 与彩色分辨率不匹配')
             from camera_pick_move import load_extrinsics
             _, _, ext = load_extrinsics(Path(vision['extrinsics_path']))
+
+            def wait_pair(timeout):
+                # 清空缓存：上一次推理耗时可能很长，只接受本轮开始后收到的新帧
+                color.clear(); depth.clear()
+                end = time.monotonic()+timeout
+                while time.monotonic() < end:
+                    rclpy.spin_once(self.node, timeout_sec=.05)
+                    now = time.monotonic()
+                    pairs = [(c,d) for c in color for d in depth
+                             if now-c[1] <= max_age and now-d[1] <= max_age and abs(c[0]-d[0]) <= skew]
+                    if pairs and camera:
+                        return min(pairs, key=lambda x: abs(x[0][0]-x[1][0]))
+                return None
+
+            records, (c, d) = resolve_records(self.cfg, wait_pair,
+                                              lambda img: infer_pixels(img, self.cfg))
+            if (camera['height'],camera['width']) != c[2].shape[:2]:
+                raise TaskError('camera_info 与彩色分辨率不匹配')
             if ext.get('parent_frame') != 'base_link' or ext.get('child_frame') != camera['frame_id']:
                 raise TaskError('外参坐标系与实时彩色相机不匹配，不能直接交给 base_link 抓取流程')
-            records = infer_pixels(c[2], self.cfg)
-            if time.monotonic()-min(c[1],d[1]) > float(self.cfg.get('max_result_age', 10)):
-                raise TaskError('推理耗时过长，抓取快照已过期')
             detections = locate(records, d[2], camera['K'], c[2].shape, self.cfg)
             self.snapshot = dict(color=c[2], depth=d[2], K=camera['K'],
                                  color_stamp=c[0], depth_stamp=d[0], frame_id=camera['frame_id'])

@@ -124,7 +124,12 @@ confidence、imgsz、device、
 可选原图像素 `roi` 等设置；默认仍是 manual，传 `--detector yolo` 切换。
 默认 CPU 推理，也可按机器情况设置 `device: '0'` 使用 GPU。
 实时模式采用当前彩色 camera_info，要求彩色/深度分辨率一致、消息时间差不超过 0.1s，
-接收帧龄不超过 1s；推理结果超过 10s 则拒绝。不同尺寸不会用简单缩放冒充深度对齐。
+接收帧龄不超过 1s；推理结果超过 `max_result_age`（默认 10s）则拒绝。不同尺寸不会用
+简单缩放冒充深度对齐。CPU 冷启动模型偶发推理过慢导致「快照已过期」、或单次推理子进程
+失败时，会**清空帧缓存重新取一对新帧并重发识别**，最多 `inference_retries`（默认 3）次，
+每次都打印第几次/帧龄；3 次都失败才中止（调大 `max_result_age`/`inference_timeout`
+或检查 CPU 负载）。取帧本身超时（`camera_timeout` 内无同步帧）不重试，直接中止——
+那通常意味着相机话题断了。
 
 注意：中心是检测框中心，未做孔轮廓精定位。沿用原点选工具的中心邻域深度策略，
 螺母孔可能测到桌面，需要现场核对抓取高度。主流程会在检测点变到 base_link 后统一加
@@ -422,6 +427,8 @@ python3 tools/nut_pick_place.py --detector external --order l
 | `开发资源/nut_sort/nut_detector_ref.py` | 固定参考位姿桩（base_link 直给，联调用） |
 | `tools/nut_pick_place.py` | 主流程（默认 dry-run） |
 | `tools/test_nut_task.py` | 离线单测（73 项，含 ready 轨迹接入/无 ready 回退、停顿期持续 spin、关节到位补发+分臂容差+逐关节诊断、视觉笛卡尔位姿核对/补发/指令vs实际报错、速度倍率、记录段姿态源、多种子 IK+对照探针、终端输入检测器、同型号多目标 random/first/abort 策略、4 段真实任务段加载、共用 place、分臂闭合值、4 种检测结果形式、base 系直给、grasp_offset_xyz 腕部偏移配置与换算） |
+| `tools/test_nut_yolo.py` | 深度/内参/ROI/locate 换算 + 快照过期与推理失败的重取帧重试（11 项） |
+| `tools/test_nut_yolo_live.py` | 配对取帧纯函数：积压跳帧、过期/失配拒绝、坏深度不掩盖另一检测（3 项） |
 
 ## 8. 安全
 
@@ -437,5 +444,7 @@ python3 tools/nut_pick_place.py --detector external --order l
 
 ```bash
 cd tools
-/usr/bin/python3 -m unittest -v test_nut_task.py
+source /opt/ros/jazzy/setup.bash && source ../install/setup.bash
+/usr/bin/python3 -m pytest test_nut_task.py test_nut_yolo.py test_nut_yolo_live.py -q
+# 当前共 87 项；只用 unittest 也可逐个文件跑
 ```
