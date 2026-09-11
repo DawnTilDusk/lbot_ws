@@ -85,8 +85,10 @@ motion:
   acce: 0.3
   linear_speed: 0.2
   linear_acce: 0.2
-  hover_height: 0.10        # 视觉点正上方悬停高度 m（高出螺母 10cm，可调）
+  hover_height: 0.10        # 接近悬停：腕部相对检测点的高度 m（必须大于 grasp_z_offset）
   grasp_z_offset: 0.1      # 下探终点相对视觉点 z 微调，要指尖更低给负值如 -0.01
+  # 抓稳后先竖直上抬的高度（相对下探终点 down 向上），抬起后才回放固定段；缺省 0.05m
+  lift_height: 0.05
   # 检测点(螺母位置) -> 腕部目标的 base_link 系平移 m，三种检测器统一生效。
   # 视觉点选对准的是腕部（法兰），指尖抓取中心在腕前约 15cm：
   # 腕部目标向机体方向（base_link -X）退 15cm，指尖才正好到螺母。实测后按毫米微调这三个数。
@@ -94,11 +96,13 @@ motion:
   # 大/中/小螺母分别微调视觉抓取几何（每字段可省，省的回退上面的全局值；单位米）：
   #   offset_xyz  = 检测点->腕部目标平移（base_link 系，负 X=向机体退，同全局 grasp_offset_xyz）
   #   z_offset    = 下探终点相对检测点的 z 微调（同全局 grasp_z_offset）
-  #   hover_height= 该尺寸悬停高度（同全局 hover_height）
+  #   hover_height= 接近悬停高度（同全局 hover_height；必须严格大于 z_offset，否则
+  #                 接近段上抬、抓后回 hover 下杵桌面，加载配置即报错）
+  #   lift_height = 抓稳后相对下探终点竖直上抬多高再回放固定段（缺省用上面的 0.05）
   grasp_by_size:
-    l: {offset_xyz: [-0.08, 0.02, 0.0], z_offset: 0.1, hover_height: 0.10}
-    m: {offset_xyz: [-0.08, 0.02, 0.0], z_offset: 0.08, hover_height: 0.10}
-    s: {offset_xyz: [-0.08, 0.02, 0.0], z_offset: 0.08, hover_height: 0.10}
+    l: {offset_xyz: [-0.07, 0.02, 0.0], z_offset: 0.09, hover_height: 0.12}
+    m: {offset_xyz: [-0.08, 0.02, 0.0], z_offset: 0.08, hover_height: 0.12}
+    s: {offset_xyz: [-0.08, 0.03, 0.0], z_offset: 0.08, hover_height: 0.12}
 
   # 序列段：逐点 MoveJ
   join_speed: 0.15          # 接入序列起点 / retreat 回 home 的慢速 MoveJ
@@ -137,7 +141,7 @@ hand:
   open: [200, 80, 255, 255, 255, 255]
   # 各臂闭合默认值（2026-09-10 现场给定，三颗螺母先共用；当晚小拇指也改为闭合 0，原 255 为张开）
   close:
-    left:  [0, 40, 0, 0, 0, 0]
+    left:  [0, 0, 0, 0, 0, 0]
     right: [0, 0, 0, 0, 0, 0]  # 右臂六路全闭（现场调定值；左拇指弯曲保留 40）
   # 若某尺寸要单独手型，按尺寸覆盖（优先级高于 close），三种写法：
   # sizes:
@@ -183,6 +187,12 @@ detector:
   # 重新拍快照整体重识别，最多 detect_attempts 轮（含首轮）都缺才中止
   detect_attempts: 3
   missing_retry_seconds: 1.0
+  # 逐颗重识别（默认 true）：第一颗用首轮快照，此后每抓一颗前双臂直接慢速 MoveJ 回
+  # ready 段末点（离场位，不重放整段/不经过竖直起点），再重新拍快照只识别剩余螺母
+  # ——抓前一颗可能碰动其余螺母，旧位置不再可信。
+  # 新鲜检测点在运动前同样过 hover/down IK 预检；找不到当前尺寸螺母则安全中止。
+  # 改成 false=三颗都用首轮快照位置连抓。
+  redetect_each_nut: false
   # 识别弹窗：等帧时显示实时画面，出框后画检测框/置信度/中心深度，停留 show_seconds
   # 秒自动继续（空格/回车立即继续，q/ESC 中止；0=必须按键才继续）。无显示环境自动不弹。
   # 命令行 --show 可在 yaml 关闭时强制打开。

@@ -8,6 +8,7 @@ import argparse
 import json
 import sys
 import tempfile
+import types
 import unittest
 from unittest import mock
 from pathlib import Path
@@ -23,7 +24,8 @@ from nut_sequences import Leg, SequenceRunner, load_leg
 from nut_pick_place import (cam_to_base, det_base_xyz, detect_until_complete,
                             grasp_points, handoff_check,
                             ik_diagnose, join_gap_rows, load_all_legs, parse_order,
-                            resolve_grasp_euler, validate_detections)
+                            resolve_grasp_euler, resume_ready_for_detect,
+                            validate_detections)
 
 WORKSPACE = Path(__file__).resolve().parent.parent
 LEFT_TRACE = WORKSPACE / 'recordings/left_trace/events.jsonl'
@@ -439,6 +441,42 @@ class ConfigAndLegsTest(unittest.TestCase):
         np.testing.assert_allclose(cfg.grasp_offset_for('s'), cfg.grasp_offset_xyz)
         self.assertEqual(cfg.grasp_z_offset_for('s'), 0.0)
         self.assertEqual(cfg.hover_height_for('s'), 0.08)
+        # lift_height 缺省 0.05，按尺寸覆盖优先
+        self.assertEqual(cfg.lift_height, 0.05)
+        self.assertEqual(cfg.lift_height_for('l'), 0.05)
+        cfg_l = self._reload(lambda y: y['motion'].update(
+            lift_height=0.08,
+            grasp_by_size={'m': {'lift_height': 0.03}}))
+        self.assertEqual(cfg_l.lift_height_for('m'), 0.03)
+        self.assertEqual(cfg_l.lift_height_for('s'), 0.08)
+
+    def test_hover_must_be_above_down(self):
+        # 全局反转：hover_height <= grasp_z_offset -> 下杵桌面，加载即拒绝
+        with self.assertRaises(TaskError):
+            self._reload(lambda y: y['motion'].update(hover_height=0.10,
+                                                      grasp_z_offset=0.10))
+        with self.assertRaises(TaskError):
+            self._reload(lambda y: y['motion'].update(hover_height=0.05,
+                                                      grasp_z_offset=0.10))
+        # 按尺寸反转同样拒绝（其余尺寸缺省合法）
+        with self.assertRaises(TaskError):
+            self._reload(lambda y: y['motion'].update(grasp_by_size={
+                'l': {'z_offset': 0.12, 'hover_height': 0.10}}))
+        # hover 严格高于 z_offset 即合法（含按尺寸）
+        ok = self._reload(lambda y: y['motion'].update(grasp_by_size={
+            'l': {'z_offset': 0.12, 'hover_height': 0.13}}))
+        self.assertEqual(ok.hover_height_for('l'), 0.13)
+
+    def test_lift_height_bad_values_rejected(self):
+        for bad in (-0.01, 0.31, 'x', float('nan')):
+            with self.subTest(bad=bad):
+                with self.assertRaises(TaskError):
+                    self._reload(lambda y, v=bad: y['motion'].update(lift_height=v))
+        with self.assertRaises(TaskError):  # 按尺寸超范围
+            self._reload(lambda y: y['motion'].update(
+                grasp_by_size={'s': {'lift_height': 0.4}}))
+        ok = self._reload(lambda y: y['motion'].update(lift_height=0.0))
+        self.assertEqual(ok.lift_height_for('l'), 0.0)
 
     def test_grasp_by_size_bad_values_rejected(self):
         with self.assertRaises(TaskError):  # 非法尺寸键
@@ -500,6 +538,18 @@ class ConfigAndLegsTest(unittest.TestCase):
         self.assertTrue(ok.show_window)
         self.assertEqual(ok.show_seconds, 0.0)
         self.assertTrue(ok.detector_raw['show_window'])
+
+    def test_redetect_each_nut_config_validation(self):
+        self.assertTrue(self.cfg.redetect_each_nut)  # 缺省即开启逐颗重识别
+        for bad in ('yes', 1, 0):
+            with self.subTest(bad=bad):
+                with self.assertRaises(TaskError):
+                    self._reload(
+                        lambda y, v=bad: y['detector'].update(redetect_each_nut=v))
+        off = self._reload(lambda y: y['detector'].update(redetect_each_nut=False))
+        self.assertFalse(off.redetect_each_nut)
+        on = self._reload(lambda y: y['detector'].update(redetect_each_nut=True))
+        self.assertTrue(on.redetect_each_nut)
 
     def test_missing_nut_retries_then_succeeds(self):
         d_l = Detection('l', np.zeros(3)); d_m = Detection('m', np.zeros(3))
@@ -788,8 +838,9 @@ class PureLogicTest(unittest.TestCase):
     def test_grasp_points_apply_base_offset_after_transform(self):
         class _GraspCfg:
             """只实现 grasp_points 需要的按尺寸访问器（生产中是 TaskConfig）。"""
-            def __init__(self, off, hover, z, by_size=None):
-                self.off, self.hover, self.z = np.array(off, float), hover, z
+            def __init__(self, off, hover, z, by_size=None, lift=0.05):
+                self.off, self.hover, self.z, self.lift = \
+                    np.array(off, float), hover, z, lift
                 self.by_size = by_size or {}
 
             def grasp_offset_for(self, label):
@@ -801,44 +852,52 @@ class PureLogicTest(unittest.TestCase):
             def grasp_z_offset_for(self, label):
                 return self.by_size.get(label, {}).get('z_offset', self.z)
 
+            def lift_height_for(self, label):
+                return self.by_size.get(label, {}).get('lift_height', self.lift)
+
         cfg = _GraspCfg([-0.15, 0.0, 0.0], 0.10, 0.0)
         R = np.diag([1., -1., 1.])
         t = np.array([1., 2., 3.])
         # 相机系结果：先外参变换到 base，再在 base 系向机体方向退 15cm
         det_cam = Detection('l', np.array([0., 1., 0.]))
-        pb_raw, pb, hover, down = grasp_points(cfg, det_cam, R, t)
+        pb_raw, pb, hover, down, lift = grasp_points(cfg, det_cam, R, t)
         np.testing.assert_allclose(pb_raw, [1, 1, 3])
         np.testing.assert_allclose(pb, [0.85, 1, 3])
         np.testing.assert_allclose(hover, [0.85, 1, 3.1])
         np.testing.assert_allclose(down, [0.85, 1, 3])
+        np.testing.assert_allclose(lift, [0.85, 1, 3.05])  # 抓后从 down 直上 5cm
         # base 直给（input/json frame=base_link）同样施加偏移，不走外参
         det_base = Detection('m', np.array([0.378, 0.326, -0.348]),
                              extra={'frame': 'base_link'})
-        pb_raw, pb, hover, down = grasp_points(cfg, det_base, R, t)
+        pb_raw, pb, hover, down, lift = grasp_points(cfg, det_base, R, t)
         np.testing.assert_allclose(pb_raw, [0.378, 0.326, -0.348])
         np.testing.assert_allclose(pb, [0.228, 0.326, -0.348])
-        # 零偏移 + z 微调时退化为原来的 hover/down 公式
+        # 零偏移 + z 微调时退化为原来的 hover/down 公式；lift 永远从 down 起算
         cfg0 = _GraspCfg(np.zeros(3), 0.10, -0.01)
-        _, pb, hover, down = grasp_points(cfg0, det_base, R, t)
+        _, pb, hover, down, lift = grasp_points(cfg0, det_base, R, t)
         np.testing.assert_allclose(pb, pb_raw)
         np.testing.assert_allclose(hover, pb_raw + [0, 0, 0.10])
         np.testing.assert_allclose(down, pb_raw + [0, 0, -0.01])
+        np.testing.assert_allclose(lift, down + [0, 0, 0.05])
         # 同一检测点，按尺寸覆盖后 l 走全局、m 走自己的偏移与高度
         cfg_size = _GraspCfg([-0.15, 0, 0], 0.10, 0.0, {
             'm': {'offset_xyz': np.array([-0.05, 0.01, 0.0]),
-                  'z_offset': -0.02, 'hover_height': 0.08}})
+                  'z_offset': -0.02, 'hover_height': 0.08,
+                  'lift_height': 0.07}})
         det_l = Detection('l', np.array([0.378, 0.326, -0.348]),
                           extra={'frame': 'base_link'})
         det_m = Detection('m', np.array([0.378, 0.326, -0.348]),
                           extra={'frame': 'base_link'})
-        _, pb_l, hov_l, down_l = grasp_points(cfg_size, det_l, R, t)
-        _, pb_m, hov_m, down_m = grasp_points(cfg_size, det_m, R, t)
+        _, pb_l, hov_l, down_l, lift_l = grasp_points(cfg_size, det_l, R, t)
+        _, pb_m, hov_m, down_m, lift_m = grasp_points(cfg_size, det_m, R, t)
         np.testing.assert_allclose(pb_l, [0.228, 0.326, -0.348])
         np.testing.assert_allclose(hov_l, [0.228, 0.326, -0.248])
         np.testing.assert_allclose(down_l, [0.228, 0.326, -0.348])
+        np.testing.assert_allclose(lift_l, [0.228, 0.326, -0.298])
         np.testing.assert_allclose(pb_m, [0.328, 0.336, -0.348])
         np.testing.assert_allclose(hov_m, [0.328, 0.336, -0.268])
         np.testing.assert_allclose(down_m, [0.328, 0.336, -0.368])
+        np.testing.assert_allclose(lift_m, [0.328, 0.336, -0.298])
 
     def _dets(self, labels=SIZE_LABELS):
         pts = {'l': [-0.1, 0.0, 0.7], 'm': [0.0, 0.0, 0.7], 's': [0.1, 0.0, 0.7]}
@@ -884,6 +943,63 @@ class PureLogicTest(unittest.TestCase):
         cfg = _CfgStub(order=('l', 'm', 's'), require_all=False)
         by = validate_detections(cfg, self._dets(['l', 's']))
         self.assertEqual(set(by), {'l', 's'})
+
+    def test_validate_labels_subset_ignores_finished_sizes(self):
+        from unittest import mock
+        cfg = _CfgStub(order=('l', 'm', 's'), require_all=True)
+        # 逐颗重识别：只在剩余子集 m/s 里挑选，画面里残留的 l 被忽略
+        by = validate_detections(cfg, self._dets(), labels=('m', 's'))
+        self.assertEqual(set(by), {'m', 's'})
+        by = validate_detections(cfg, self._dets(), labels=('s',))
+        self.assertEqual(set(by), {'s'})
+        # 子集里缺 m -> require_all=true 仍中止（即使画面里有已抓走的 l）
+        with self.assertRaises(TaskError):
+            validate_detections(cfg, self._dets(['l', 's']), labels=('m', 's'))
+        # 子集外的重复目标不触发 duplicate_policy=abort
+        cfg_abort = _CfgStub(order=('l', 'm', 's'), require_all=True, policy='abort')
+        dl1 = Detection('l', np.zeros(3)); dl2 = Detection('l', np.ones(3))
+        ds = Detection('s', np.array([0.1, 0., 0.7]))
+        by = validate_detections(cfg_abort, [dl1, dl2, ds], labels=('s',))
+        self.assertIs(by['s'], ds)
+        # 子集内的重复目标仍按 random 策略选
+        cfg_rnd = _CfgStub(order=('l', 'm', 's'), require_all=True, policy='random')
+        dm1 = Detection('m', np.zeros(3)); dm2 = Detection('m', np.ones(3))
+        with mock.patch('random.choice', return_value=dm2):
+            self.assertIs(validate_detections(cfg_rnd, [dm1, dm2, ds],
+                                              labels=('m', 's'))['m'], dm2)
+
+    def test_detect_until_complete_retry_uses_labels_subset(self):
+        from unittest import mock
+        cfg = _CfgStub(order=('l', 'm', 's'), require_all=True)
+        d_m = Detection('m', np.zeros(3)); d_s = Detection('s', np.zeros(3))
+        # 首轮只看到 m（子集中缺 s）-> 重试，第二轮齐全
+        rounds = [[d_m], [d_m, d_s]]
+        calls = []
+        with mock.patch('time.sleep') as slept:
+            dets, chosen = detect_until_complete(
+                cfg, lambda: (calls.append(1) or rounds[len(calls) - 1]),
+                what='重识别', labels=('m', 's'))
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(set(chosen), {'m', 's'})
+        slept.assert_called_once_with(1.0)
+        # 画面一直只有 l：对 ('m','s') 子集而言始终缺料，attempts 用尽后中止
+        calls = []
+        with mock.patch('time.sleep'):
+            with self.assertRaises(TaskError):
+                detect_until_complete(
+                    cfg, lambda: (calls.append(1)
+                                  or [Detection('l', np.zeros(3))]),
+                    labels=('m', 's'))
+        self.assertEqual(len(calls), 3)
+        # require_all=false：子集缺料也不重试，只返回看到的
+        cfg_loose = _CfgStub(order=('l', 'm', 's'), require_all=False)
+        calls = []
+        with mock.patch('time.sleep') as slept:
+            _, chosen = detect_until_complete(
+                cfg_loose, lambda: (calls.append(1) or [d_m]), labels=('m', 's'))
+        self.assertEqual(len(calls), 1)
+        slept.assert_not_called()
+        self.assertEqual(set(chosen), {'m'})
 
     def test_handoff_check_flags_gap(self):
         release = _fake_leg((0.40, 0.05, -0.36))
@@ -1448,6 +1564,94 @@ class DetectorAndStoreTest(unittest.TestCase):
         pose = store2.get('left', 'left_grasp_init')
         self.assertEqual(pose['position_m'], [0.3, 0.4, 0.2])
         self.assertEqual(pose['euler_deg'], [90, 0, 45])
+
+
+class ResumeReadyTest(unittest.TestCase):
+    """逐颗重识别前回 ready 末点：只 MoveJ 到末关节角，不接入 pt0/不重放开场段。"""
+
+    def _ready_leg(self, name):
+        return types.SimpleNamespace(
+            target=name,
+            joints=[np.full(6, 0.1), np.full(6, 0.9)])  # pt0 vs 末点明显不同
+
+    def _env(self, diff_left=0.3, diff_right=0.3,
+             ready_l=True, ready_r=True):
+        cfg = types.SimpleNamespace(start_tolerance=0.05, join_speed=0.15,
+                                 join_acce=0.15, point_dwell_seconds=0.0,
+                                 ready_hold_seconds=0.0)
+
+        class _R:
+            def __init__(self, arm, diff):
+                self.arm, self._diff = arm, diff
+
+            def joint_diff(self, q):
+                return self._diff
+
+            def wait_state(self, t):
+                return True
+
+        class _Runner:
+            def __init__(self):
+                self.goto, self.dwells, self.joins = [], [], []
+
+            def _goto_point(self, robot, q, where, speed=None, acce=None):
+                self.goto.append((robot.arm, np.array(q, float).copy(), where,
+                                  speed, acce))
+
+            def _dwell(self, sec, what):
+                self.dwells.append(what)
+
+            def join_to_start(self, leg, tag=''):
+                self.joins.append((leg.target, tag))
+
+        left = _R('left', diff_left)
+        right = _R('right', diff_right)
+        runner = _Runner()
+        left_legs = [types.SimpleNamespace(target='left_task', joints=[np.zeros(6)])]
+        apprs = {"l": types.SimpleNamespace(target='right_approach',
+                                         joints=[np.zeros(6)])}
+        rl = self._ready_leg('left_ready_001') if ready_l else None
+        rr = self._ready_leg('right_ready_001') if ready_r else None
+        return cfg, runner, left_legs, apprs, left, right, rl, rr
+
+    def test_direct_movej_to_ready_endpoint_not_pt0(self):
+        cfg, runner, left_legs, apprs, left, right, rl, rr = self._env()
+        with mock.patch('time.sleep'):
+            resume_ready_for_detect(cfg, runner, left, right, left_legs, apprs,
+                                    rl, rr)
+        # 两臂各一条 MoveJ，目标必须是 ready 末关节角（0.9），绝不是 pt0（0.1）
+        self.assertEqual([g[0] for g in runner.goto], ['left', 'right'])  # 左先右后
+        for arm, q, where, speed, acce in runner.goto:
+            np.testing.assert_allclose(q, np.full(6, 0.9))
+            self.assertEqual(speed, cfg.join_speed)
+            self.assertEqual(acce, cfg.join_acce)
+        self.assertEqual(runner.joins, [])  # 没有接入段起点
+
+    def test_already_at_endpoint_skips_move(self):
+        cfg, runner, left_legs, apprs, left, right, rl, rr = \
+            self._env(diff_left=0.01, diff_right=0.3)
+        with mock.patch('time.sleep'):
+            resume_ready_for_detect(cfg, runner, left, right, left_legs, apprs,
+                                    rl, rr)
+        self.assertEqual([g[0] for g in runner.goto], ['right'])  # 左臂已在末点不补动
+
+    def test_no_ready_leg_falls_back_to_join_task_start(self):
+        cfg, runner, left_legs, apprs, left, right, rl, rr = \
+            self._env(ready_l=False, ready_r=False)
+        with mock.patch('time.sleep'):
+            resume_ready_for_detect(cfg, runner, left, right, left_legs, apprs,
+                                    rl, rr)
+        self.assertEqual(runner.goto, [])
+        self.assertEqual([j[0] for j in runner.joins],
+                         ['left_task', 'right_approach'])
+
+    def test_feedback_missing_aborts(self):
+        cfg, runner, left_legs, apprs, left, right, rl, rr = self._env()
+        left._diff = None
+        with mock.patch('time.sleep'):
+            with self.assertRaises(TaskError):
+                resume_ready_for_detect(cfg, runner, left, right, left_legs,
+                                        apprs, rl, rr)
 
 
 class _CfgStub:

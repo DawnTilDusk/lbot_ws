@@ -215,14 +215,21 @@ class TaskConfig:
         self.linear_acce = float(m.get('linear_acce', 0.2))
         self.hover_height = float(m.get('hover_height', 0.10))
         self.grasp_z_offset = float(m.get('grasp_z_offset', 0.0))
+        # 抓稳后竖直抬起高度（相对下探终点 down 向上，独立于接近悬停 hover_height）
+        try:
+            self.lift_height = float(m.get('lift_height', 0.05))
+        except (TypeError, ValueError):
+            raise TaskError(f"motion.lift_height 必须是数（米），当前 {m.get('lift_height')!r}")
+        if not np.isfinite(self.lift_height) or not 0 <= self.lift_height <= 0.30:
+            raise TaskError(f'motion.lift_height={self.lift_height} 必须是 0~0.30 米之间的有限数')
         # 检测点 -> 腕部目标的 base_link 系平移（米）。视觉/点选给的是螺母位置，
         # 而 pose_states/腕部（法兰）与指尖抓取中心有约 15cm 前后偏差：
         # 默认把腕部目标向机体方向（base_link -X）退 15cm，指尖才正好到螺母。
         # 三种检测器（manual/input/yolo/...）在变到 base_link 之后统一施加。
         self.grasp_offset_xyz = _parse_grasp_offset(
             m.get('grasp_offset_xyz', [-0.15, 0.0, 0.0]), 'motion.grasp_offset_xyz')
-        # 按尺寸覆盖（motion.grasp_by_size.<l/m/s>）：offset_xyz/z_offset/hover_height
-        # 三个字段都可省，省的回退上面的全局值；大中小螺母几何不同时分别微调。
+        # 按尺寸覆盖（motion.grasp_by_size.<l/m/s>）：offset_xyz/z_offset/hover_height/
+        # lift_height 四个字段都可省，省的回退上面的全局值；大中小螺母几何不同时分别微调。
         self.grasp_by_size = {}
         gb = m.get('grasp_by_size', {}) or {}
         if not isinstance(gb, dict):
@@ -232,12 +239,12 @@ class TaskConfig:
                 raise TaskError(f'motion.grasp_by_size 只允许 l/m/s 键，当前 {k!r}')
             if not isinstance(v, dict):
                 raise TaskError(f'motion.grasp_by_size.{k} 必须是映射'
-                                f'（offset_xyz/z_offset/hover_height 任选）')
+                                f'（offset_xyz/z_offset/hover_height/lift_height 任选）')
             entry = {}
             if 'offset_xyz' in v:
                 entry['offset_xyz'] = _parse_grasp_offset(
                     v['offset_xyz'], f'motion.grasp_by_size.{k}.offset_xyz')
-            for fk in ('z_offset', 'hover_height'):
+            for fk in ('z_offset', 'hover_height', 'lift_height'):
                 if fk in v:
                     try:
                         fv = float(v[fk])
@@ -246,8 +253,22 @@ class TaskConfig:
                                         f'当前 {v[fk]!r}')
                     if not np.isfinite(fv):
                         raise TaskError(f'motion.grasp_by_size.{k}.{fk} 必须是有限数（米）')
+                    if fk == 'lift_height' and not 0 <= fv <= 0.30:
+                        raise TaskError(
+                            f'motion.grasp_by_size.{k}.lift_height={fv} 必须在 0~0.30 米')
                     entry[fk] = fv
             self.grasp_by_size[k] = entry
+        # 竖直几何必须单调：接近悬停 hover 在抓取点 down 上方（z 越大越高）。
+        # 若 z_offset >= hover_height，下探反向上走、抓后回 hover 反而下杵桌面。
+        for k in SIZE_LABELS:
+            zoff, hov = self.grasp_z_offset_for(k), self.hover_height_for(k)
+            if zoff >= hov:
+                where = ('motion.grasp_by_size.' + k) if k in self.grasp_by_size else 'motion'
+                raise TaskError(
+                    f'{where}: 抓取点 z_offset={zoff:.3f} 必须小于悬停 hover_height='
+                    f'{hov:.3f}（当前 hover 不在 down 上方，会导致接近时上抬、'
+                    f'抓后回 hover 下杵桌面）。把 hover_height 调到 z_offset+期望余量'
+                    f'（如 +0.05），或减小 z_offset')
         self.join_speed = float(m.get('join_speed', 0.15))
         self.join_acce = float(m.get('join_acce', 0.15))
         self.sequence_speed = float(m.get('sequence_speed', 0.3))
@@ -397,6 +418,12 @@ class TaskConfig:
             raise TaskError(f'detector.show_seconds 必须是秒数，当前 {det.get("show_seconds")!r}')
         if not 0 <= self.show_seconds <= 30:
             raise TaskError('detector.show_seconds 必须在 0~30 秒（0=必须按键才继续）')
+        # 每颗螺母抓取前重新拍快照识别：抓前一颗可能碰动其余螺母，旧位置不能再用。
+        # 重拍前双臂自动回 ready 离场位（与开机首次识别同位姿）。
+        raw_redetect = det.get('redetect_each_nut', True)
+        if not isinstance(raw_redetect, bool):
+            raise TaskError(f'detector.redetect_each_nut 必须是 true/false，当前 {raw_redetect!r}')
+        self.redetect_each_nut = raw_redetect
 
     def grasp_orientation_for(self, label):
         """label 尺寸的视觉抓取姿态源 (位姿库名|None, 记录段映射|None)：覆盖 > 全局。"""
@@ -412,6 +439,10 @@ class TaskConfig:
 
     def hover_height_for(self, label):
         return self.grasp_by_size.get(label, {}).get('hover_height', self.hover_height)
+
+    def lift_height_for(self, label):
+        """抓稳后相对 down 竖直上抬的高度：grasp_by_size 覆盖 > 全局（缺省 0.05m）。"""
+        return self.grasp_by_size.get(label, {}).get('lift_height', self.lift_height)
 
     def close_for(self, arm, label):
         """该臂抓 label 螺母时的 6 路闭合值：尺寸级 arm > 尺寸级 joint > 臂默认。"""

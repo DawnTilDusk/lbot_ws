@@ -45,19 +45,23 @@ def det_base_xyz(det, R_BTC, t_BTC):
 
 
 def grasp_points(cfg, det, R_BTC, t_BTC):
-    """一条检测 -> (检测点 base, 腕部抓取目标 base, hover, down)。
+    """一条检测 -> (检测点 base, 腕部抓取目标 base, hover, down, lift)。
 
     pb_raw 是视觉给出的螺母位置（base_link 系）；腕部目标 = 螺母位置 +
     该尺寸的 grasp_by_size.<label>.offset_xyz（未配则用全局 grasp_offset_xyz，
     默认向机体方向 -X 退 15cm 的腕-指尖偏差补偿）。
-    hover/down 都以补偿后的腕部目标为基准：hover 竖直高该尺寸 hover_height，
-    down 竖直偏该尺寸 z_offset。dry-run 打印、IK 预检、实机抓取必须共用此函数。
+    竖直三个点都以补偿后的腕部目标 pb 为基准（z 向上为正）：
+      hover = pb + hover_height  —— 接近悬停（必须高于 down，配置加载时强制）
+      down  = pb + z_offset      —— 下探抓取点
+      lift  = down + lift_height —— 抓稳后先竖直上抬（独立于 hover，默认 5cm）
+    dry-run 打印、IK 预检、实机抓取必须共用此函数。
     """
     pb_raw = det_base_xyz(det, R_BTC, t_BTC)
     pb = pb_raw + cfg.grasp_offset_for(det.label)
     hover = pb + np.array([0, 0, cfg.hover_height_for(det.label)])
     down = pb + np.array([0, 0, cfg.grasp_z_offset_for(det.label)])
-    return pb_raw, pb, hover, down
+    lift = down + np.array([0, 0, cfg.lift_height_for(det.label)])
+    return pb_raw, pb, hover, down, lift
 
 
 def parse_order(text):
@@ -106,16 +110,20 @@ def load_all_legs(cfg):
     return left_legs, apprs, places, release_leg, ready_left, ready_right
 
 
-def validate_detections(cfg, detections):
+def validate_detections(cfg, detections, labels=None):
     """按 order 每类选一颗。同型号多目标按 detector.duplicate_policy 处理：
-    abort（缺省）= 中止；random = 随机选一颗；first = 取列表第一颗。"""
+    abort（缺省）= 中止；random = 随机选一颗；first = 取列表第一颗。
+
+    labels 给定时只在该尺寸子集内挑选/判缺（逐颗重识别时只传剩余未抓的尺寸，
+    已抓走的尺寸即使仍出现在画面里也忽略）；缺省用 cfg.order。"""
     import random
+    labels = tuple(cfg.order if labels is None else labels)
     policy = getattr(cfg, 'duplicate_policy', 'abort')
     by_label = {}
     for det in detections:
         by_label.setdefault(det.label, []).append(det)
     chosen = {}
-    for label in cfg.order:
+    for label in labels:
         dets = by_label.get(label, [])
         if not dets:
             continue
@@ -135,30 +143,32 @@ def validate_detections(cfg, detections):
             chosen[label] = pick
         else:
             chosen[label] = dets[0]
-    missing = [k for k in cfg.order if k not in by_label]
+    missing = [k for k in labels if k not in by_label]
     if missing and cfg.require_all:
         raise TaskError('缺少螺母检测结果：' + '、'.join(SIZE_NAMES_CN[k] for k in missing)
                         + '（require_all=true；配置改 false 可跳过）')
     return chosen
 
 
-def detect_until_complete(cfg, detect_call, what='视觉检测'):
+def detect_until_complete(cfg, detect_call, what='视觉检测', labels=None):
     """整轮检测 -> 缺型号就等一拍重新检测，最多 cfg.detect_attempts 轮。
 
     detect_call() 每轮重新取快照/重跑识别（无状态假设）；require_all=false 时缺料
     本就允许，不重试，直接走 validate_detections 的跳过逻辑。
+    labels 给定时只要求该尺寸子集（逐颗重识别时传剩余未抓尺寸）。
     返回 (最后一轮的原始 detections, validate 后每尺寸选一颗的 chosen)。
     """
     import time
+    labels = tuple(cfg.order if labels is None else labels)
     attempts = max(1, int(getattr(cfg, 'detect_attempts', 3)))
     wait_s = max(0.0, float(getattr(cfg, 'missing_retry_seconds', 1.0)))
     detections = []
     for attempt in range(1, attempts + 1):
         detections = detect_call()
         present = {d.label for d in detections}
-        missing = [k for k in cfg.order if k not in present]
+        missing = [k for k in labels if k not in present]
         if not missing or not cfg.require_all:
-            return detections, validate_detections(cfg, detections)
+            return detections, validate_detections(cfg, detections, labels)
         names = '、'.join(SIZE_NAMES_CN[k] for k in missing)
         if attempt < attempts:
             print(f'{what}第 {attempt}/{attempts} 轮缺少 {names}螺母'
@@ -167,7 +177,8 @@ def detect_until_complete(cfg, detect_call, what='视觉检测'):
                 time.sleep(wait_s)
         else:
             print(f'{what}连续 {attempts} 轮都缺少 {names}螺母')
-    return detections, validate_detections(cfg, detections)  # 末轮仍缺 -> 抛 TaskError
+    # 末轮仍缺 -> validate 在 require_all=true 时抛 TaskError
+    return detections, validate_detections(cfg, detections, labels)
 
 
 # ---------------- dry-run 打印 -----------------------------------------------
@@ -374,7 +385,7 @@ def print_plan(cfg, store, left_legs, apprs, places, release_leg, detections, R_
                 print(f'    {SIZE_NAMES_CN[label]}螺母({label}): 检测到 {len(dets)} 个（{what}）')
             det = dets[0]
             in_base = det.extra.get('frame') in ('base', 'base_link')
-            pb_raw, pb, hover, down = grasp_points(cfg, det, R_BTC, t_BTC)
+            pb_raw, pb, hover, down, lift = grasp_points(cfg, det, R_BTC, t_BTC)
             if in_base:
                 print(f'    {SIZE_NAMES_CN[label]}螺母({label}) 检测点 base='
                       f'{np.round(pb_raw*1000,1)} mm（视觉直给，未走外参）')
@@ -391,6 +402,8 @@ def print_plan(cfg, store, left_legs, apprs, places, release_leg, detections, R_
                   f'-> {np.round(hover*1000,1)}')
             print(f'      MoveL down({cfg.grasp_z_offset_for(label)*1000:+.0f}mm) '
                   f'-> {np.round(down*1000,1)}')
+            print(f'      MoveL lift(down+{cfg.lift_height_for(label)*1000:.0f}mm，抓稳后上抬) '
+                  f'-> {np.round(lift*1000,1)}')
     else:
         print('  【视觉结果】manual 模式 dry-run 无检测结果；--execute 到位后弹窗点选。')
     print('=' * 78)
@@ -504,9 +517,45 @@ def initial_poses(cfg, runner, left_legs, apprs, left, right,
     time.sleep(cfg.ready_hold_seconds)
 
 
+def resume_ready_for_detect(cfg, runner, left, right, left_legs, apprs,
+                            ready_left, ready_right):
+    """抓完上一颗后、重新拍快照前：双臂直接回到视觉检测离场位（ready 末点）。
+
+    与开机首次识别同一位姿（ready 段末点），保证不入画、不投 IR 阴影，外参几何也一致。
+    注意只去末点：直接慢速 MoveJ 到 ready 段最后一组关节角，不先接入 ready 段 pt0
+    （开机时的竖直状态）再整段重放——那是开机从任意姿态安全离场用的路径，螺母之间
+    没必要重走。左臂先回（右臂停在盒边不动），右臂再回（左臂已停住）。
+    """
+    import time
+    appr0 = apprs['l']
+    print('重新识别前：双臂直接 MoveJ 回 ready 离场位末点（不重放 ready 段）...')
+    for arm, rc, ready, fallback in (('左', left, ready_left, left_legs[0]),
+                                     ('右', right, ready_right, appr0)):
+        if ready is not None:
+            q_end = ready.joints[-1]
+            diff = rc.joint_diff(q_end)
+            if diff is None:
+                raise TaskError(f'{arm}臂无关节反馈，无法回到 ready 末点')
+            if diff <= cfg.start_tolerance:
+                print(f'  {arm}臂：已在 ready 末点（Δ={diff:.3f}），不补动')
+            else:
+                print(f'  {arm}臂：慢速 MoveJ 直接到 {ready.target} 末点'
+                      f'（最大关节差 {diff:.3f} rad，速度 {cfg.join_speed}）')
+                runner._goto_point(rc, q_end, f'{arm}臂回 ready 末点',
+                                   speed=cfg.join_speed, acce=cfg.join_acce)
+                runner._dwell(cfg.point_dwell_seconds, 'ready 末点到位')
+        else:
+            print(f'  {arm}臂：未配 ready 段，慢速 MoveJ 到任务段 {fallback.target} pt0')
+            runner.join_to_start(fallback, tag=f'（{arm}臂重识别 ready）')
+        rc.wait_state(0.5)
+    print(f'  静停 {cfg.ready_hold_seconds:.1f}s 等振动平息后再拍快照...')
+    time.sleep(cfg.ready_hold_seconds)
+
+
 def run_one_nut(cfg, runner, left, right, label, det, eul_left, R_BTC, t_BTC,
                 left_legs, apprs, places):
-    pb_raw, pb, hover, down = grasp_points(cfg, det, R_BTC, t_BTC)
+    pb_raw, pb, hover, down, lift = grasp_points(cfg, det, R_BTC, t_BTC)
+    lift_mm = cfg.lift_height_for(label) * 1000
 
     def dwell(sec, what):
         runner._dwell(sec, what)
@@ -526,8 +575,9 @@ def run_one_nut(cfg, runner, left, right, label, det, eul_left, R_BTC, t_BTC,
     print(f'  [左] 闭合手 {close_vals}，静置 {cfg.settle_seconds:.1f}s')
     left.hand_close(close_vals, settle=cfg.settle_seconds)
     dwell(cfg.pre_hand_seconds, '抓稳后抬起')
-    print('  [左] MoveL 竖直抬起...')
-    runner._goto_pose(left, hover, eul_left, f'{SIZE_NAMES_CN[label]}螺母抬起',
+    print(f'  [左] MoveL 从抓取点竖直上抬 {lift_mm:.0f}mm '
+          f'到 {np.round(lift * 1000, 1)}mm（先脱离桌面再做其他动作）...')
+    runner._goto_pose(left, lift, eul_left, f'{SIZE_NAMES_CN[label]}螺母抓后竖直上抬',
                       linear=True)
     dwell(cfg.between_leg_seconds, '进入固定段')
 
@@ -606,6 +656,59 @@ def ik_diagnose(robot, seed_leg, fail_pt, fail_eul):
     return rows
 
 
+def ik_seed_bank(left_legs):
+    """当前关节角之外，加录段里抓取区/低位的真实臂型，防远处种子数值收敛失败。
+
+    返回 (seed_leg, 传给 ik_check 的 extra_seeds, 与 ik_check 返回下标对应的种子名)。
+    """
+    seed_leg = left_legs[0]
+    seeds = [seed_leg.joints[0], seed_leg.joints[-1]]
+    names = ['当前关节角', f'{seed_leg.target} pt0（记录臂型）',
+             f'{seed_leg.target} 末点（记录臂型）', '空种子（驱动自读当前角）']
+    return seed_leg, seeds, names
+
+
+def precheck_grasp_ik(cfg, robot, ik_seeds, seed_names, label, det, eul_label,
+                      R_BTC, t_BTC):
+    """单颗螺母视觉点的 hover/down 驱动 IK 预检（每个真机要动的笛卡尔点都必须过）。
+
+    返回首个失败 (label, tag, pt, pb, eul)；全部可解返回 None。
+    """
+    pb_raw, pb, hover, down, lift = grasp_points(cfg, det, R_BTC, t_BTC)
+    frame = det.extra.get('frame') in ('base', 'base_link')
+    print(f'  {SIZE_NAMES_CN[label]}({label}) 检测点 base='
+          f'{np.round(pb_raw * 1000, 1)} mm（{"视觉直给" if frame else "外参变换"}）')
+    print(f'    腕部目标(+偏移{np.round(cfg.grasp_offset_for(label) * 1000, 1)}mm)='
+          f'{np.round(pb * 1000, 1)} mm')
+    first_fail = None
+    for pt, tag in ((hover, 'hover'), (down, 'down'), (lift, 'lift')):
+        ok, used = robot.ik_check(pt, eul_label, extra_seeds=ik_seeds)
+        if ok:
+            print(f'    {tag} {np.round(pt * 1000, 1)} 逆解通过（种子：{seed_names[used]}）')
+        elif first_fail is None:
+            first_fail = (label, tag, pt, pb, eul_label)
+    return first_fail
+
+
+def handle_ik_failure(cfg, robot, seed_leg, seed_names, first_fail):
+    """预检失败：打印对照探针；--allow-ik-fail 只警告，否则硬中止（绝不盲动）。"""
+    label, tag, pt, pb, eul_fail = first_fail
+    for line in ik_diagnose(robot, seed_leg, pt, eul_fail):
+        print(line)
+    msg = (f'左臂对{SIZE_NAMES_CN[label]}螺母 {tag} 逆解失败（试遍种子 '
+           f'{"、".join(seed_names)}）：xyz(mm)={np.round(pt * 1000, 1)} '
+           f'euler(deg)={np.degrees(eul_fail).round(1)}。对照探针见上。')
+    if getattr(cfg, 'allow_ik_fail', False):
+        print('  ⚠ --allow-ik-fail：跳过预检继续。真实 MoveJP/MoveL 仍由驱动把关，'
+              '驱动解不了会在该步安全中止（不会盲动）。')
+    else:
+        raise TaskError(
+            msg + '若探针证明点本身可达、只是裸 IK 服务误判，确认现场安全后可加 '
+                  '--allow-ik-fail 让真实 MoveJP 尝试（驱动仍会拒绝不可达点）；'
+                  '否则排查视觉位置/深度/外参，或换 '
+                  f'left.grasp_orientation_by_size.{label} / left.grasp_orientation 姿态。')
+
+
 def execute(cfg, store, R_BTC, t_BTC, K, left_legs, apprs, places, release_leg,
             grasp_poses, ready_left=None, ready_right=None):
     """grasp_poses: {l/m/s: (eul_rad, 来源说明)}；调用前 main 已保证 order 内尺寸都可用。"""
@@ -652,57 +755,60 @@ def execute(cfg, store, R_BTC, t_BTC, K, left_legs, apprs, places, release_leg,
             eul_k, src_k = grasp_poses[k]
             ov = '（覆盖全局）' if k in cfg.grasp_orientation_by_size else ''
             print(f'  {SIZE_NAMES_CN[k]}({k})：{src_k}{ov}，euler(deg)={np.degrees(eul_k).round(1)}')
-        # IK 种子：当前关节角之外，加录段里抓取区/低位的真实臂型，防远处种子数值收敛失败
-        seed_leg = left_legs[0]
-        ik_seeds = [seed_leg.joints[0], seed_leg.joints[-1]]
-        seed_names = ['当前关节角', f'{seed_leg.target} pt0（记录臂型）',
-                      f'{seed_leg.target} 末点（记录臂型）', '空种子（驱动自读当前角）']
-        print(f'视觉抓取点 IK 预检（左臂，{len(by_label)} 颗；姿态按尺寸，位置来自视觉）...')
+        # 首轮快照只做开工前可达性总检；逐颗的新鲜点在循环内重新识别后再检一次
+        seed_leg, ik_seeds, seed_names = ik_seed_bank(left_legs)
+        print(f'视觉抓取点 IK 预检（左臂，{len(by_label)} 颗；姿态按尺寸，位置来自首轮快照）...')
         first_fail = None
         for label in cfg.order:
             if label not in by_label:
                 continue
-            det = by_label[label]
-            eul_label = grasp_poses[label][0]
-            pb_raw, pb, hover, down = grasp_points(cfg, det, R_BTC, t_BTC)
-            frame = det.extra.get('frame') in ('base', 'base_link')
-            print(f'  {SIZE_NAMES_CN[label]}({label}) 检测点 base='
-                  f'{np.round(pb_raw*1000,1)} mm（{"视觉直给" if frame else "外参变换"}）')
-            print(f'    腕部目标(+偏移{np.round(cfg.grasp_offset_for(label)*1000,1)}mm)='
-                  f'{np.round(pb*1000,1)} mm')
-            for pt, tag in ((hover, 'hover'), (down, 'down')):
-                ok, used = left.ik_check(pt, eul_label, extra_seeds=ik_seeds)
-                if ok:
-                    print(f'    {tag} {np.round(pt*1000,1)} 逆解通过（种子：{seed_names[used]}）')
-                elif first_fail is None:
-                    first_fail = (label, tag, pt, pb, eul_label)
-
+            fail = precheck_grasp_ik(cfg, left, ik_seeds, seed_names, label,
+                                     by_label[label], grasp_poses[label][0],
+                                     R_BTC, t_BTC)
+            if fail is not None and first_fail is None:
+                first_fail = fail
         if first_fail is not None:
-            label, tag, pt, pb, eul_fail = first_fail
-            lines = ik_diagnose(left, seed_leg, pt, eul_fail)
-            for line in lines:
-                print(line)
-            msg = (f'左臂对{SIZE_NAMES_CN[label]}螺母 {tag} 逆解失败（试遍种子 '
-                   f'{"、".join(seed_names)}）：xyz(mm)={np.round(pt*1000,1)} '
-                   f'euler(deg)={np.degrees(eul_fail).round(1)}。对照探针见上。')
-            if getattr(cfg, 'allow_ik_fail', False):
-                print('  ⚠ --allow-ik-fail：跳过预检继续。真实 MoveJP/MoveL 仍由驱动把关，'
-                      '驱动解不了会在该步安全中止（不会盲动）。')
-            else:
-                raise TaskError(
-                    msg + '若探针证明点本身可达、只是裸 IK 服务误判，确认现场安全后可加 '
-                          '--allow-ik-fail 让真实 MoveJP 尝试（驱动仍会拒绝不可达点）；'
-                          '否则排查视觉位置/深度/外参，或换 '
-                          f'left.grasp_orientation_by_size.{label} / left.grasp_orientation 姿态。')
-        if first_fail is None:
-            print('视觉点全部可达，开始抓放。')
+            handle_ik_failure(cfg, left, seed_leg, seed_names, first_fail)
+        else:
+            print('首轮快照视觉点全部可达，开始抓放（每颗抓取前还会重新识别+复检）。')
         print_plan(cfg, store, left_legs, apprs, places, release_leg,
                    detections, R_BTC, t_BTC, grasp_poses=grasp_poses,
                    ready_left=ready_left, ready_right=ready_right)
 
         remaining = [k for k in cfg.order if k in by_label]
+        redetect = getattr(cfg, 'redetect_each_nut', True)
+        if redetect and len(remaining) > 1:
+            print(f'已开启逐颗重识别（detector.redetect_each_nut）：第一颗用首轮快照，'
+                  f'此后每抓一颗前双臂回 ready 重新拍快照（共 {len(remaining)} 颗），'
+                  '前一颗碰动其余螺母时按新位置抓。')
         for idx, label in enumerate(remaining):
             det = by_label[label]
+            if redetect and idx > 0:
+                # 抓前一颗可能碰动其余螺母：回离场位 -> 只对剩余尺寸重拍快照 -> 新鲜点复检 IK
+                labels_now = tuple(remaining[idx:])
+                print(f'==== 抓{SIZE_NAMES_CN[label]}螺母({label}) 前重新识别，'
+                      f'本轮只找剩余 {"".join(labels_now)} ====')
+                resume_ready_for_detect(cfg, runner, left, right, left_legs, apprs,
+                                        ready_left, ready_right)
+                fresh, chosen = detect_until_complete(
+                    cfg, lambda labs=labels_now: detector.detect(labs),
+                    what=f'{SIZE_NAMES_CN[label]}螺母抓取前重识别',
+                    labels=labels_now)
+                print(f'重识别看到 {len(fresh)} 个目标：'
+                      + (', '.join(SIZE_NAMES_CN[d.label] for d in fresh) if fresh
+                         else '（无）'))
+                if label not in chosen:
+                    raise TaskError(
+                        f'重新识别后找不到{SIZE_NAMES_CN[label]}螺母（本轮要求 '
+                        f'{"".join(labels_now)}），不能按旧位置盲抓，任务中止；'
+                        '请检查螺母是否被带出工作区后重跑')
+                det = chosen[label]
+                fail = precheck_grasp_ik(cfg, left, ik_seeds, seed_names, label,
+                                         det, grasp_poses[label][0], R_BTC, t_BTC)
+                if fail is not None:
+                    handle_ik_failure(cfg, left, seed_leg, seed_names, fail)
+                else:
+                    print(f'  {SIZE_NAMES_CN[label]}螺母新鲜视觉点 IK 复检通过。')
             run_one_nut(cfg, runner, left, right, label, det, grasp_poses[label][0],
                         R_BTC, t_BTC, left_legs, apprs, places)
             if idx < len(remaining) - 1:
