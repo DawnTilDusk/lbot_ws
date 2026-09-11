@@ -20,7 +20,8 @@ from nut_robot import (DEFAULT_CONFIG, PoseStore, SIZE_LABELS, TaskConfig,
 from nut_detectors import (DepthPixelDetector, Detection, InputDetector,
                            JsonDetector, normalize)
 from nut_sequences import Leg, SequenceRunner, load_leg
-from nut_pick_place import (cam_to_base, det_base_xyz, grasp_points, handoff_check,
+from nut_pick_place import (cam_to_base, det_base_xyz, detect_until_complete,
+                            grasp_points, handoff_check,
                             ik_diagnose, join_gap_rows, load_all_legs, parse_order,
                             resolve_grasp_euler, validate_detections)
 
@@ -387,6 +388,150 @@ class ConfigAndLegsTest(unittest.TestCase):
         with self.assertRaises(TaskError):
             load_all_legs(self._reload(m))
 
+    def test_grasp_by_size_overrides_and_fallback(self):
+        def m(y):
+            y['motion']['grasp_by_size'] = {
+                'm': {'offset_xyz': [-0.05, 0.01, 0.0], 'z_offset': 0.02},
+                's': {'hover_height': 0.08}}
+        cfg = self._reload(m)
+        # l 未配 -> 全部回退全局（CONFIG 里未写 offset，用缺省 -0.15）
+        np.testing.assert_allclose(cfg.grasp_offset_for('l'), cfg.grasp_offset_xyz)
+        self.assertEqual(cfg.grasp_z_offset_for('l'), cfg.grasp_z_offset)
+        self.assertEqual(cfg.hover_height_for('l'), cfg.hover_height)
+        # m 覆盖 offset/z，hover 未覆盖回退全局
+        np.testing.assert_allclose(cfg.grasp_offset_for('m'), [-0.05, 0.01, 0.0])
+        self.assertEqual(cfg.grasp_z_offset_for('m'), 0.02)
+        self.assertEqual(cfg.hover_height_for('m'), 0.10)
+        # s 只覆盖 hover
+        np.testing.assert_allclose(cfg.grasp_offset_for('s'), cfg.grasp_offset_xyz)
+        self.assertEqual(cfg.grasp_z_offset_for('s'), 0.0)
+        self.assertEqual(cfg.hover_height_for('s'), 0.08)
+
+    def test_grasp_by_size_bad_values_rejected(self):
+        with self.assertRaises(TaskError):  # 非法尺寸键
+            self._reload(lambda y: y['motion'].update(grasp_by_size={'x': {}}))
+        with self.assertRaises(TaskError):  # 4 个数
+            self._reload(lambda y: y['motion'].update(
+                grasp_by_size={'l': {'offset_xyz': [1, 2, 3, 4]}}))
+        with self.assertRaises(TaskError):  # 模长 >0.3m（毫米单位笔误）
+            self._reload(lambda y: y['motion'].update(
+                grasp_by_size={'l': {'offset_xyz': [0.5, 0, 0]}}))
+        with self.assertRaises(TaskError):  # 非映射
+            self._reload(lambda y: y['motion'].update(grasp_by_size={'l': [0, 0, 0]}))
+        with self.assertRaises(TaskError):  # z 非数
+            self._reload(lambda y: y['motion'].update(
+                grasp_by_size={'l': {'z_offset': 'low'}}))
+
+    def test_grasp_orientation_by_size_parses(self):
+        def m(y):
+            y['left']['grasp_orientation_by_size'] = {
+                'm': 'grasp_m_pose',
+                'l': {'sequence': 'left_ready1_001', 'point': 0}}
+        cfg = self._reload(m)
+        self.assertEqual(cfg.grasp_orientation_for('m'), ('grasp_m_pose', None))
+        self.assertEqual(cfg.grasp_orientation_for('l')[1]['sequence'], 'left_ready1_001')
+        # s 未覆盖 -> 全局 left_grasp_init
+        self.assertEqual(cfg.grasp_orientation_for('s'), ('left_grasp_init', None))
+        with self.assertRaises(TaskError):  # 非法尺寸键
+            self._reload(lambda y: y['left'].update(
+                grasp_orientation_by_size={'x': 'p'}))
+        with self.assertRaises(TaskError):  # 值不是名字/映射
+            self._reload(lambda y: y['left'].update(
+                grasp_orientation_by_size={'l': 123}))
+
+    def test_detect_attempts_config_validation(self):
+        for bad in (0, 11, 'x', [3], 2.5):
+            with self.subTest(bad=bad):
+                with self.assertRaises(TaskError):
+                    self._reload(lambda y, v=bad: y['detector'].update(detect_attempts=v))
+        with self.assertRaises(TaskError):
+            self._reload(lambda y: y['detector'].update(missing_retry_seconds=-0.1))
+        ok = self._reload(lambda y: y['detector'].update(detect_attempts=5,
+                                                         missing_retry_seconds=0.0))
+        self.assertEqual(ok.detect_attempts, 5)
+        self.assertEqual(ok.missing_retry_seconds, 0.0)
+
+    def test_show_window_config_validation(self):
+        self.assertFalse(self.cfg.show_window)
+        self.assertEqual(self.cfg.show_seconds, 2.0)
+        for bad in ('yes', 1, 0):
+            with self.subTest(bad=bad):
+                with self.assertRaises(TaskError):
+                    self._reload(lambda y, v=bad: y['detector'].update(show_window=v))
+        for bad in (-0.1, 31, 'x'):
+            with self.subTest(bad=bad):
+                with self.assertRaises(TaskError):
+                    self._reload(lambda y, v=bad: y['detector'].update(show_seconds=v))
+        ok = self._reload(lambda y: y['detector'].update(show_window=True,
+                                                         show_seconds=0.0))
+        self.assertTrue(ok.show_window)
+        self.assertEqual(ok.show_seconds, 0.0)
+        self.assertTrue(ok.detector_raw['show_window'])
+
+    def test_missing_nut_retries_then_succeeds(self):
+        d_l = Detection('l', np.zeros(3)); d_m = Detection('m', np.zeros(3))
+        d_s = Detection('s', np.zeros(3))
+        rounds = [[d_l, d_s], [d_l, d_m, d_s]]  # 首轮缺中螺母，第二轮齐全
+        calls = []
+        with mock.patch('time.sleep') as slept:
+            dets, chosen = detect_until_complete(
+                self.cfg, lambda: (calls.append(1) or rounds[len(calls) - 1]))
+        self.assertEqual(len(calls), 2)
+        self.assertIs(chosen['m'], d_m)
+        self.assertEqual(set(chosen), {'l', 'm', 's'})
+        slept.assert_called_once_with(1.0)
+
+    def test_missing_nut_gives_up_after_attempt_cap(self):
+        calls = []
+        with mock.patch('time.sleep'):
+            with self.assertRaises(TaskError):
+                detect_until_complete(
+                    self.cfg, lambda: (calls.append(1) or [Detection('l', np.zeros(3))]))
+        self.assertEqual(len(calls), 3)  # 默认 3 轮
+        cfg1 = self._reload(lambda y: y['detector'].update(detect_attempts=1))
+        calls = []
+        with mock.patch('time.sleep'):
+            with self.assertRaises(TaskError):
+                detect_until_complete(
+                    cfg1, lambda: (calls.append(1) or [Detection('l', np.zeros(3))]))
+        self.assertEqual(len(calls), 1)
+
+    def test_require_all_false_skips_retry_when_missing(self):
+        cfg = self._reload(lambda y: y.update(require_all=False))
+        calls = []
+        only_l = [Detection('l', np.zeros(3))]
+        with mock.patch('time.sleep') as slept:
+            dets, chosen = detect_until_complete(
+                cfg, lambda: (calls.append(1) or only_l))
+        self.assertEqual(len(calls), 1)       # 缺料允许跳过 -> 不重试
+        slept.assert_not_called()
+        self.assertEqual(set(chosen), {'l'})
+
+    def test_resolve_grasp_euler_per_size(self):
+        # 同一 PoseStore 里放全局姿态与 m 覆盖姿态
+        store = PoseStore(self.cfg.poses_path)
+        store.put('left', 'left_grasp_init', [0.3, 0.3, -0.3], [40.0, -6.67, -95.0], None)
+        store.put('left', 'grasp_m_pose', [0.3, 0.3, -0.3], [10.0, 20.0, 30.0], None)
+        store.save()
+        cfg = self._reload(lambda y: y['left'].update(
+            grasp_orientation_by_size={'m': 'grasp_m_pose'}))
+        eul_m, src_m = resolve_grasp_euler(cfg, store, 'm')
+        eul_s, src_s = resolve_grasp_euler(cfg, store, 's')
+        np.testing.assert_allclose(np.degrees(eul_m), [10, 20, 30])
+        self.assertIn('grasp_m_pose', src_m)
+        np.testing.assert_allclose(np.degrees(eul_s), [40.0, -6.67, -95.0])
+        self.assertIn('left_grasp_init', src_s)
+        # 缺位姿名 -> TaskError（由 resolve_grasp_eulers 转成 (None, 原因)）
+        cfg_bad = self._reload(lambda y: y['left'].update(
+            grasp_orientation_by_size={'l': 'no_such_pose'}))
+        with self.assertRaises(TaskError):
+            resolve_grasp_euler(cfg_bad, store, 'l')
+        from nut_pick_place import resolve_grasp_eulers
+        poses = resolve_grasp_eulers(cfg_bad, store)
+        self.assertIsNone(poses['l'][0])
+        self.assertIn('no_such_pose', poses['l'][1])
+        self.assertIsNotNone(poses['m'][0])
+
 
 LEFT_GRASP_DIR = WORKSPACE / 'recordings/left_grasp_middle'
 LEFT_BACK_DIR = WORKSPACE / 'recordings/left_middle_back'
@@ -585,9 +730,22 @@ class PureLogicTest(unittest.TestCase):
         np.testing.assert_allclose(det_base_xyz(det_cam, R, t), t)
 
     def test_grasp_points_apply_base_offset_after_transform(self):
-        from types import SimpleNamespace
-        cfg = SimpleNamespace(grasp_offset_xyz=np.array([-0.15, 0.0, 0.0]),
-                              hover_height=0.10, grasp_z_offset=0.0)
+        class _GraspCfg:
+            """只实现 grasp_points 需要的按尺寸访问器（生产中是 TaskConfig）。"""
+            def __init__(self, off, hover, z, by_size=None):
+                self.off, self.hover, self.z = np.array(off, float), hover, z
+                self.by_size = by_size or {}
+
+            def grasp_offset_for(self, label):
+                return self.by_size.get(label, {}).get('offset_xyz', self.off)
+
+            def hover_height_for(self, label):
+                return self.by_size.get(label, {}).get('hover_height', self.hover)
+
+            def grasp_z_offset_for(self, label):
+                return self.by_size.get(label, {}).get('z_offset', self.z)
+
+        cfg = _GraspCfg([-0.15, 0.0, 0.0], 0.10, 0.0)
         R = np.diag([1., -1., 1.])
         t = np.array([1., 2., 3.])
         # 相机系结果：先外参变换到 base，再在 base 系向机体方向退 15cm
@@ -604,12 +762,27 @@ class PureLogicTest(unittest.TestCase):
         np.testing.assert_allclose(pb_raw, [0.378, 0.326, -0.348])
         np.testing.assert_allclose(pb, [0.228, 0.326, -0.348])
         # 零偏移 + z 微调时退化为原来的 hover/down 公式
-        cfg0 = SimpleNamespace(grasp_offset_xyz=np.zeros(3),
-                               hover_height=0.10, grasp_z_offset=-0.01)
+        cfg0 = _GraspCfg(np.zeros(3), 0.10, -0.01)
         _, pb, hover, down = grasp_points(cfg0, det_base, R, t)
         np.testing.assert_allclose(pb, pb_raw)
         np.testing.assert_allclose(hover, pb_raw + [0, 0, 0.10])
         np.testing.assert_allclose(down, pb_raw + [0, 0, -0.01])
+        # 同一检测点，按尺寸覆盖后 l 走全局、m 走自己的偏移与高度
+        cfg_size = _GraspCfg([-0.15, 0, 0], 0.10, 0.0, {
+            'm': {'offset_xyz': np.array([-0.05, 0.01, 0.0]),
+                  'z_offset': -0.02, 'hover_height': 0.08}})
+        det_l = Detection('l', np.array([0.378, 0.326, -0.348]),
+                          extra={'frame': 'base_link'})
+        det_m = Detection('m', np.array([0.378, 0.326, -0.348]),
+                          extra={'frame': 'base_link'})
+        _, pb_l, hov_l, down_l = grasp_points(cfg_size, det_l, R, t)
+        _, pb_m, hov_m, down_m = grasp_points(cfg_size, det_m, R, t)
+        np.testing.assert_allclose(pb_l, [0.228, 0.326, -0.348])
+        np.testing.assert_allclose(hov_l, [0.228, 0.326, -0.248])
+        np.testing.assert_allclose(down_l, [0.228, 0.326, -0.348])
+        np.testing.assert_allclose(pb_m, [0.328, 0.336, -0.348])
+        np.testing.assert_allclose(hov_m, [0.328, 0.336, -0.268])
+        np.testing.assert_allclose(down_m, [0.328, 0.336, -0.368])
 
     def _dets(self, labels=SIZE_LABELS):
         pts = {'l': [-0.1, 0.0, 0.7], 'm': [0.0, 0.0, 0.7], 's': [0.1, 0.0, 0.7]}

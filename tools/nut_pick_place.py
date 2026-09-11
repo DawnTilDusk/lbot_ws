@@ -48,14 +48,15 @@ def grasp_points(cfg, det, R_BTC, t_BTC):
     """一条检测 -> (检测点 base, 腕部抓取目标 base, hover, down)。
 
     pb_raw 是视觉给出的螺母位置（base_link 系）；腕部目标 = 螺母位置 +
-    cfg.grasp_offset_xyz（默认向机体方向 -X 退 15cm 的腕-指尖偏差补偿）。
-    hover/down 都以补偿后的腕部目标为基准：hover 竖直高 hover_height，
-    down 竖直偏 grasp_z_offset。dry-run 打印、IK 预检、实机抓取必须共用此函数。
+    该尺寸的 grasp_by_size.<label>.offset_xyz（未配则用全局 grasp_offset_xyz，
+    默认向机体方向 -X 退 15cm 的腕-指尖偏差补偿）。
+    hover/down 都以补偿后的腕部目标为基准：hover 竖直高该尺寸 hover_height，
+    down 竖直偏该尺寸 z_offset。dry-run 打印、IK 预检、实机抓取必须共用此函数。
     """
     pb_raw = det_base_xyz(det, R_BTC, t_BTC)
-    pb = pb_raw + cfg.grasp_offset_xyz
-    hover = pb + np.array([0, 0, cfg.hover_height])
-    down = pb + np.array([0, 0, cfg.grasp_z_offset])
+    pb = pb_raw + cfg.grasp_offset_for(det.label)
+    hover = pb + np.array([0, 0, cfg.hover_height_for(det.label)])
+    down = pb + np.array([0, 0, cfg.grasp_z_offset_for(det.label)])
     return pb_raw, pb, hover, down
 
 
@@ -140,6 +141,34 @@ def validate_detections(cfg, detections):
     return chosen
 
 
+def detect_until_complete(cfg, detect_call, what='视觉检测'):
+    """整轮检测 -> 缺型号就等一拍重新检测，最多 cfg.detect_attempts 轮。
+
+    detect_call() 每轮重新取快照/重跑识别（无状态假设）；require_all=false 时缺料
+    本就允许，不重试，直接走 validate_detections 的跳过逻辑。
+    返回 (最后一轮的原始 detections, validate 后每尺寸选一颗的 chosen)。
+    """
+    import time
+    attempts = max(1, int(getattr(cfg, 'detect_attempts', 3)))
+    wait_s = max(0.0, float(getattr(cfg, 'missing_retry_seconds', 1.0)))
+    detections = []
+    for attempt in range(1, attempts + 1):
+        detections = detect_call()
+        present = {d.label for d in detections}
+        missing = [k for k in cfg.order if k not in present]
+        if not missing or not cfg.require_all:
+            return detections, validate_detections(cfg, detections)
+        names = '、'.join(SIZE_NAMES_CN[k] for k in missing)
+        if attempt < attempts:
+            print(f'{what}第 {attempt}/{attempts} 轮缺少 {names}螺母'
+                  f'（已检测到 {len(detections)} 颗），等待 {wait_s:g}s 后重新检测...')
+            if wait_s:
+                time.sleep(wait_s)
+        else:
+            print(f'{what}连续 {attempts} 轮都缺少 {names}螺母')
+    return detections, validate_detections(cfg, detections)  # 末轮仍缺 -> 抛 TaskError
+
+
 # ---------------- dry-run 打印 -----------------------------------------------
 
 def print_leg_table(title, legs, markers=None):
@@ -206,11 +235,14 @@ def join_gap_rows(left_legs, appr, places, place_shared, ready_left=None, ready_
 
 
 def print_plan(cfg, store, left_legs, appr, places, release_leg, detections, R_BTC, t_BTC,
-               grasp_eul=None, grasp_src='', ready_left=None, ready_right=None):
+               grasp_poses=None, ready_left=None, ready_right=None):
+    """grasp_poses: {l/m/s: (eul_rad|None, 来源说明)}，由 resolve_grasp_eulers 得到。"""
+    grasp_poses = grasp_poses or {}
     print('=' * 78)
     scale_txt = f'  速度倍率={cfg.speed_scale:g}' if cfg.speed_scale != 1.0 else ''
     print(f'双臂交接抓放  顺序={"".join(cfg.order)} '
-          f'({"".join(SIZE_NAMES_CN[k] for k in cfg.order)})  hover={cfg.hover_height*1000:.0f}mm'
+          f'({"".join(SIZE_NAMES_CN[k] for k in cfg.order)})  '
+          f'hover 默认 {cfg.hover_height*1000:.0f}mm'
           f'{scale_txt}')
     print('-' * 78)
     print('  【开机 ready 段】上使能 + 张开初始手型后逐点 MoveJ 回放，末点=视觉检测时的离场 ready 位：')
@@ -257,24 +289,29 @@ def print_plan(cfg, store, left_legs, appr, places, release_leg, detections, R_B
                 f'{cfg.reached_reissue_count} 次；视觉 MoveJP/MoveL 末端容差 '
                 f'{cfg.pose_pos_tolerance * 1000:.0f}mm/{np.degrees(cfg.pose_ori_tolerance):.1f}°')
     print(f'  【{tol_txt}】')
-    off_mm = np.round(cfg.grasp_offset_xyz * 1000, 1)
-    if np.linalg.norm(off_mm) > 0.1:
-        print(f'  【视觉抓取点偏移】检测点(螺母位置) -> 腕部目标：{off_mm} mm'
-              f'（base_link 系；负 X=向机体方向，补偿腕-指尖前后偏差）')
+    print('  【视觉抓取点偏移】检测点(螺母位置) -> 腕部目标（base_link 系；'
+          '负 X=向机体方向，补偿腕-指尖前后偏差；未标注即全局值）：')
+    for k in cfg.order:
+        ov = '（覆盖全局）' if 'offset_xyz' in cfg.grasp_by_size.get(k, {}) else ''
+        off_mm = np.round(cfg.grasp_offset_for(k) * 1000, 1)
+        print(f'    {SIZE_NAMES_CN[k]}({k}): 偏移 {off_mm} mm{ov}，'
+              f'hover +{cfg.hover_height_for(k)*1000:.0f}mm，'
+              f'down {cfg.grasp_z_offset_for(k)*1000:+.0f}mm')
     print(f'  【手型】张开 {cfg.hand_open_vals}；闭合值（顺序[拇指侧摆,拇指弯曲,食,中,无名,小]）')
     for k in cfg.order:
         print(f'    {SIZE_NAMES_CN[k]}({k}): 左 {cfg.close_for("left", k)}  '
               f'右 {cfg.close_for("right", k)}')
 
-    if grasp_eul is not None:
-        print(f'  【左臂视觉抓取姿态】取自{grasp_src}：'
-              f'euler(deg)={np.degrees(grasp_eul).round(1)}（xyz 由视觉覆盖）')
-    else:
-        miss = (f'记录段 {cfg.grasp_orientation_rec["sequence"]} '
-                f'pt{cfg.grasp_orientation_rec["point"]}'
-                if cfg.grasp_orientation_rec else cfg.left_grasp_pose_name)
-        print(f'  【左臂视觉抓取姿态】⚠ 抓取姿态源 {miss} 不可用；'
-              f'--execute 前必须修好，dry-run 段表照常显示')
+    print('  【左臂视觉抓取姿态】（xyz 由视觉覆盖；姿态可按尺寸分别配置）：')
+    for k in cfg.order:
+        eul, src = grasp_poses.get(k, (None, ''))
+        ov = '（覆盖全局）' if k in cfg.grasp_orientation_by_size else ''
+        if eul is not None:
+            print(f'    {SIZE_NAMES_CN[k]}({k}): 取自{src}{ov}，'
+                  f'euler(deg)={np.degrees(eul).round(1)}')
+        else:
+            print(f'    {SIZE_NAMES_CN[k]}({k}): ⚠ {src or orientation_source_desc(cfg, k)}'
+                  f'；--execute 前必须修好，dry-run 段表照常显示')
 
     if detections:
         by_label = {}
@@ -301,34 +338,73 @@ def print_plan(cfg, store, left_legs, appr, places, release_leg, detections, R_B
             else:
                 print(f'    {SIZE_NAMES_CN[label]}螺母({label}) p_cam={np.round(det.p_cam*1000,1)} mm')
                 print(f'      检测点 base={np.round(pb_raw*1000,1)} mm（外参变换）')
-            off_mm = np.round(cfg.grasp_offset_xyz * 1000, 1)
+            off_mm = np.round(cfg.grasp_offset_for(label) * 1000, 1)
             if np.linalg.norm(off_mm) > 0.1:
-                print(f'      腕部目标 = 检测点 + 偏移 {off_mm} mm（grasp_offset_xyz，'
-                      f'负 X=向机体退，补偿腕-指尖偏差）')
+                ov = '，按尺寸覆盖' if 'offset_xyz' in cfg.grasp_by_size.get(label, {}) else ''
+                print(f'      腕部目标 = 检测点 + 偏移 {off_mm} mm（负 X=向机体退，'
+                      f'补偿腕-指尖偏差{ov}）')
             print(f'      腕部抓取目标 -> {np.round(pb*1000,1)}')
-            print(f'      MoveJP hover(+{cfg.hover_height*1000:.0f}mm) -> {np.round(hover*1000,1)}')
-            print(f'      MoveL down({cfg.grasp_z_offset*1000:+.0f}mm) -> {np.round(down*1000,1)}')
+            print(f'      MoveJP hover(+{cfg.hover_height_for(label)*1000:.0f}mm) '
+                  f'-> {np.round(hover*1000,1)}')
+            print(f'      MoveL down({cfg.grasp_z_offset_for(label)*1000:+.0f}mm) '
+                  f'-> {np.round(down*1000,1)}')
     else:
         print('  【视觉结果】manual 模式 dry-run 无检测结果；--execute 到位后弹窗点选。')
     print('=' * 78)
 
 
-def resolve_grasp_euler(cfg, store):
-    """视觉抓取姿态(rad)与来源说明：记录段映射 -> 取该点；位姿库名 -> PoseStore。"""
-    rec = cfg.grasp_orientation_rec
+def resolve_grasp_euler(cfg, store, label=None, leg_cache=None):
+    """视觉抓取姿态(rad)与来源说明。
+
+    label=None 用全局 left.grasp_orientation（兼容旧调用）；传 l/m/s 时优先用
+    left.grasp_orientation_by_size.<label>，缺覆盖回退全局。
+    记录段映射 -> 取该点；位姿库名 -> PoseStore。leg_cache 在尺寸间复用加载结果。
+    """
+    if label is None:
+        name, rec = cfg.left_grasp_pose_name, cfg.grasp_orientation_rec
+        where = 'left.grasp_orientation'
+    else:
+        name, rec = cfg.grasp_orientation_for(label)
+        where = f'left.grasp_orientation_by_size.{label}'
     if rec is not None:
-        file_ = resolve_ws(rec['file']) if rec['file'] else resolve_ws(cfg.left_trace)
-        spec = (file_, rec['sequence'], None, False)
-        leg = load_leg('left', spec, cfg.check_other)
+        key = (str(rec['file']), rec['sequence'], rec['point'])
+        if leg_cache is not None and key in leg_cache:
+            leg = leg_cache[key]
+        else:
+            file_ = resolve_ws(rec['file']) if rec['file'] else resolve_ws(cfg.left_trace)
+            spec = (file_, rec['sequence'], None, False)
+            leg = load_leg('left', spec, cfg.check_other)
+            if leg_cache is not None:
+                leg_cache[key] = leg
         i = rec['point']
         if i >= len(leg.joints):
-            raise TaskError(f'left.grasp_orientation 指定的 {rec["sequence"]} '
+            raise TaskError(f'{where} 指定的 {rec["sequence"]} '
                             f'pt{i} 不存在（该段仅 {len(leg.joints)} 点）')
         eul = np.radians(leg.poses[i]['eul_deg'])
-        label = f'记录段 {rec["sequence"]} pt{i}（{leg.file.name}）'
-        return eul, label
-    name = cfg.left_grasp_pose_name
+        src = f'记录段 {rec["sequence"]} pt{i}（{leg.file.name}）'
+        return eul, src
     return pose_euler_rad(store.get('left', name)), f'已示教位姿 {name}'
+
+
+def orientation_source_desc(cfg, label):
+    """该尺寸姿态源的配置描述（报错/打印用）：位姿名或 记录段pt。"""
+    name, rec = cfg.grasp_orientation_for(label)
+    return (f'记录段 {rec["sequence"]} pt{rec["point"]}' if rec is not None else name)
+
+
+def resolve_grasp_eulers(cfg, store):
+    """{l,m,s: (eul_rad|None, 来源说明)}；某尺寸源不可用时 (None, 原因)。
+
+    dry-run 只警告（计划照打）；--execute 在 main 里对 None 硬中止。
+    """
+    leg_cache = {}
+    out = {}
+    for k in SIZE_LABELS:
+        try:
+            out[k] = resolve_grasp_euler(cfg, store, k, leg_cache)
+        except TaskError as exc:
+            out[k] = (None, f'{orientation_source_desc(cfg, k)} 不可用：{exc}')
+    return out
 
 
 # ---------------- 外参/内参 ---------------------------------------------------
@@ -390,7 +466,8 @@ def run_one_nut(cfg, runner, left, right, label, det, eul_left, R_BTC, t_BTC,
 
     print(f'==== {SIZE_NAMES_CN[label]}螺母({label}) ====')
     print(f'  检测点(螺母) {np.round(pb_raw * 1000, 1)}mm -> 腕部目标'
-          f'{np.round(pb * 1000, 1)}mm（偏移 {np.round(cfg.grasp_offset_xyz * 1000, 1)}mm）')
+          f'{np.round(pb * 1000, 1)}mm（偏移 '
+          f'{np.round(cfg.grasp_offset_for(label) * 1000, 1)}mm）')
     print(f'  [左] MoveJP 到螺母正上方 {np.round(hover * 1000, 1)}mm...')
     runner._goto_pose(left, hover, eul_left, f'{SIZE_NAMES_CN[label]}螺母 hover 悬停')
     dwell(cfg.hover_dwell_seconds, '悬停确认，准备下探')
@@ -482,7 +559,8 @@ def ik_diagnose(robot, seed_leg, fail_pt, fail_eul):
 
 
 def execute(cfg, store, R_BTC, t_BTC, K, left_legs, appr, places, release_leg,
-            grasp_eul, grasp_src, ready_left=None, ready_right=None):
+            grasp_poses, ready_left=None, ready_right=None):
+    """grasp_poses: {l/m/s: (eul_rad, 来源说明)}；调用前 main 已保证 order 内尺寸都可用。"""
     import rclpy
     from nut_robot import RobotClient
     from nut_sequences import SequenceRunner
@@ -516,45 +594,49 @@ def execute(cfg, store, R_BTC, t_BTC, K, left_legs, appr, places, release_leg,
         print(f'双臂已离场，开始视觉检测（{cfg.detector_type}），需要顺序：'
               f'{"".join(cfg.order)} ...')
         detector = build_detector(cfg, node, K)
-        detections = detector.detect(cfg.order)
+        detections, by_label = detect_until_complete(
+            cfg, lambda: detector.detect(cfg.order))
         print(f'检测到 {len(detections)} 颗：'
               f'{", ".join(SIZE_NAMES_CN[d.label] for d in detections)}')
-        by_label = validate_detections(cfg, detections)
 
-        eul_left = grasp_eul
-        print(f'视觉抓取姿态来源：{grasp_src}，euler(deg)={np.degrees(eul_left).round(1)}')
+        print('视觉抓取姿态（按尺寸）：')
+        for k in cfg.order:
+            eul_k, src_k = grasp_poses[k]
+            ov = '（覆盖全局）' if k in cfg.grasp_orientation_by_size else ''
+            print(f'  {SIZE_NAMES_CN[k]}({k})：{src_k}{ov}，euler(deg)={np.degrees(eul_k).round(1)}')
         # IK 种子：当前关节角之外，加录段里抓取区/低位的真实臂型，防远处种子数值收敛失败
         seed_leg = left_legs[0]
         ik_seeds = [seed_leg.joints[0], seed_leg.joints[-1]]
         seed_names = ['当前关节角', f'{seed_leg.target} pt0（记录臂型）',
                       f'{seed_leg.target} 末点（记录臂型）', '空种子（驱动自读当前角）']
-        print(f'视觉抓取点 IK 预检（左臂，{len(by_label)} 颗；姿态固定，位置来自视觉）...')
+        print(f'视觉抓取点 IK 预检（左臂，{len(by_label)} 颗；姿态按尺寸，位置来自视觉）...')
         first_fail = None
         for label in cfg.order:
             if label not in by_label:
                 continue
             det = by_label[label]
+            eul_label = grasp_poses[label][0]
             pb_raw, pb, hover, down = grasp_points(cfg, det, R_BTC, t_BTC)
             frame = det.extra.get('frame') in ('base', 'base_link')
             print(f'  {SIZE_NAMES_CN[label]}({label}) 检测点 base='
                   f'{np.round(pb_raw*1000,1)} mm（{"视觉直给" if frame else "外参变换"}）')
-            print(f'    腕部目标(+偏移{np.round(cfg.grasp_offset_xyz*1000,1)}mm)='
+            print(f'    腕部目标(+偏移{np.round(cfg.grasp_offset_for(label)*1000,1)}mm)='
                   f'{np.round(pb*1000,1)} mm')
             for pt, tag in ((hover, 'hover'), (down, 'down')):
-                ok, used = left.ik_check(pt, eul_left, extra_seeds=ik_seeds)
+                ok, used = left.ik_check(pt, eul_label, extra_seeds=ik_seeds)
                 if ok:
                     print(f'    {tag} {np.round(pt*1000,1)} 逆解通过（种子：{seed_names[used]}）')
                 elif first_fail is None:
-                    first_fail = (label, tag, pt, pb)
+                    first_fail = (label, tag, pt, pb, eul_label)
 
         if first_fail is not None:
-            label, tag, pt, pb = first_fail
-            lines = ik_diagnose(left, seed_leg, pt, eul_left)
+            label, tag, pt, pb, eul_fail = first_fail
+            lines = ik_diagnose(left, seed_leg, pt, eul_fail)
             for line in lines:
                 print(line)
             msg = (f'左臂对{SIZE_NAMES_CN[label]}螺母 {tag} 逆解失败（试遍种子 '
                    f'{"、".join(seed_names)}）：xyz(mm)={np.round(pt*1000,1)} '
-                   f'euler(deg)={np.degrees(eul_left).round(1)}。对照探针见上。')
+                   f'euler(deg)={np.degrees(eul_fail).round(1)}。对照探针见上。')
             if getattr(cfg, 'allow_ik_fail', False):
                 print('  ⚠ --allow-ik-fail：跳过预检继续。真实 MoveJP/MoveL 仍由驱动把关，'
                       '驱动解不了会在该步安全中止（不会盲动）。')
@@ -562,17 +644,18 @@ def execute(cfg, store, R_BTC, t_BTC, K, left_legs, appr, places, release_leg,
                 raise TaskError(
                     msg + '若探针证明点本身可达、只是裸 IK 服务误判，确认现场安全后可加 '
                           '--allow-ik-fail 让真实 MoveJP 尝试（驱动仍会拒绝不可达点）；'
-                          '否则排查视觉位置/深度/外参，或换 left.grasp_orientation 姿态。')
+                          '否则排查视觉位置/深度/外参，或换 '
+                          f'left.grasp_orientation_by_size.{label} / left.grasp_orientation 姿态。')
         if first_fail is None:
             print('视觉点全部可达，开始抓放。')
         print_plan(cfg, store, left_legs, appr, places, release_leg,
-                   detections, R_BTC, t_BTC, grasp_eul=eul_left,
+                   detections, R_BTC, t_BTC, grasp_poses=grasp_poses,
                    ready_left=ready_left, ready_right=ready_right)
 
         remaining = [k for k in cfg.order if k in by_label]
         for idx, label in enumerate(remaining):
             det = by_label[label]
-            run_one_nut(cfg, runner, left, right, label, det, eul_left,
+            run_one_nut(cfg, runner, left, right, label, det, grasp_poses[label][0],
                         R_BTC, t_BTC, left_legs, appr, places)
             if idx < len(remaining) - 1:
                 print(f'  螺母之间停顿 {cfg.between_leg_seconds:.1f}s，'
@@ -607,6 +690,8 @@ def main():
     p.add_argument('--allow-ik-fail', action='store_true',
                    help='裸 IK 预检全失败也继续：真实 MoveJP/MoveL 仍由驱动把关，'
                         '不可达会在该步安全中止。仅在对照探针证明是预检误判时使用')
+    p.add_argument('--show', action='store_true',
+                   help='YOLO 识别时弹窗实时显示画面/检测框（即使 yaml detector.show_window=false）')
     args = p.parse_args()
 
     try:
@@ -614,6 +699,8 @@ def main():
             args.config, arm_override=args.arm, order_override=args.order,
             detector_override=args.detector, speed_scale=args.speed)
         cfg.allow_ik_fail = bool(args.allow_ik_fail)
+        if args.show:
+            cfg.detector_raw['show_window'] = True
         if args.speed != 1.0:
             print(f'速度倍率 --speed {args.speed:g}：视觉段 {cfg.speed:g}/{cfg.linear_speed:g}、'
                   f'段间接入 {cfg.join_speed:g}、序列逐点 {cfg.sequence_speed:g}')
@@ -624,36 +711,39 @@ def main():
         R, t, K = load_transforms(cfg)
         left_legs, appr, places, release_leg, ready_left, ready_right = load_all_legs(cfg)
 
-        try:
-            grasp_eul, grasp_src = resolve_grasp_euler(cfg, store)
-        except TaskError:
-            grasp_eul, grasp_src = None, ''  # 姿态源不可用：dry-run 只警告；--execute 硬中止
+        # 三个尺寸的姿态源各自解析（不可用的为 (None, 原因)：dry-run 只警告，--execute 硬中止）
+        grasp_poses = resolve_grasp_eulers(cfg, store)
 
         if args.go_ready:
             if not args.execute:
                 raise TaskError('--go-ready 是真机动作，必须与 --execute 一起用')
             go_ready(cfg, left_legs, appr, ready_left, ready_right)
         elif args.execute:
-            if grasp_eul is None:
+            missing = [(k, grasp_poses[k][1]) for k in cfg.order
+                       if grasp_poses.get(k, (None, ''))[0] is None]
+            if missing:
+                lines = '；'.join(f'{SIZE_NAMES_CN[k]}({k}): {why}' for k, why in missing)
                 raise TaskError(
-                    '左臂视觉抓取姿态源不可用：位姿名请先运行 '
-                    'capture_task_pose.py --arm left --name <名>；'
-                    '或把 left.grasp_orientation 改成 {file?, sequence, point?} 指向记录段')
+                    f'左臂视觉抓取姿态源不可用——{lines}。位姿名请先运行 '
+                    'capture_task_pose.py --arm left --name <名>（如 left_grasp_l/m/s）；'
+                    '或把 left.grasp_orientation(_by_size.<尺寸>) 改成 '
+                    '{file?, sequence, point?} 指向记录段')
             # 执行前仍打印骨架与交接点核对（检测点到位后再补打印）
             execute(cfg, store, R, t, K, left_legs, appr, places, release_leg,
-                    grasp_eul, grasp_src, ready_left, ready_right)
+                    grasp_poses, ready_left, ready_right)
         else:
             detections = []
             if cfg.detector_type == 'yolo':
                 from nut_yolo import detect_once
-                detections, _ = detect_once(cfg)
-                validate_detections(cfg, detections)
-            if cfg.detector_type in ('json', 'external', 'input'):
+                detections, _ = detect_until_complete(
+                    cfg, lambda: detect_once(cfg)[0])
+            elif cfg.detector_type in ('json', 'external', 'input'):
                 from nut_detectors import build_detector
                 detector = build_detector(cfg, None, K)
-                detections = detector.detect(cfg.order)
+                detections, _ = detect_until_complete(
+                    cfg, lambda: detector.detect(cfg.order))
             print_plan(cfg, store, left_legs, appr, places, release_leg,
-                       detections, R, t, grasp_eul=grasp_eul, grasp_src=grasp_src,
+                       detections, R, t, grasp_poses=grasp_poses,
                        ready_left=ready_left, ready_right=ready_right)
             print('\n[dry-run] 未驱动机器人。确认段表/交接点/抓取点后加 --execute 真机执行。')
     except TaskError as exc:

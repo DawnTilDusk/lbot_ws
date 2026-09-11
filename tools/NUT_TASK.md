@@ -104,16 +104,20 @@ XYZ 均为米，`p_cam` 属于彩色光学坐标系，`p_base` 属于 `base_link
 
 ```zsh
 /usr/bin/python3 tools/nut_pick_place.py --detector yolo
-# 确认实物坐标、抓取高度、交接点后，实际运行：
+# 确认实物坐标、抓取高度、交接点后，实际运行（识别弹窗随 show_window 自动弹出）：
 source install/setup.zsh
 /usr/bin/python3 tools/nut_pick_place.py --detector yolo --execute
+# yaml 里关掉弹窗时可临时强制开窗：... --detector yolo --show
 ```
 
 执行路径：YOLO 框中心 -> 配对深度邻域中位数 -> 内参反投影 `p_cam` ->
 外参换算到 base_link 检测点 -> 加 `grasp_offset_xyz`（默认向机体退 15cm）得腕部目标 ->
 `run_one_nut` 左臂 hover/down -> 既有双臂序列（dry-run 打印、IK 预检、实机共用同一换算）。
-缺类由业务校验中止（require_all）；**同型号多目标不再硬中止**，按 yaml
-`detector.duplicate_policy` 处理（2026-09-11 起）：`random`（当前配置）随机抓同型号
+缺类由业务校验中止（require_all）；**单轮漏检不再立刻中止**（2026-09-11 起）：整轮识别后
+若缺型号，等 `detector.missing_retry_seconds`（默认 1s）重新拍快照整体重识别，最多
+`detector.detect_attempts`（默认 3）轮都缺才中止，每轮打印缺哪颗/第几轮；require_all=false
+时缺料本就允许跳过，不重试。同型号多颗的重复目标，按 yaml
+`detector.duplicate_policy` 处理：`random`（当前配置）随机抓同型号
 候选项里的一颗并打印选了第几颗/坐标，`first` 取检测结果列表第一颗，`abort` 保留旧的
 安全中止行为。注意随机策略不看置信度/位置——若同型号候选项里有明显误检框，优先调高
 `detector.confidence` 或布置时分开螺母，而不是指望随机策略绕开它。
@@ -131,6 +135,14 @@ confidence、imgsz、device、
 或检查 CPU 负载）。取帧本身超时（`camera_timeout` 内无同步帧）不重试，直接中止——
 那通常意味着相机话题断了。
 
+识别弹窗（2026-09-11 起，`detector.show_window: true`，当前配置已开）：等同步帧期间持续
+刷新实时画面，推理前显示 `YOLO inferring ...`，出框后在彩色帧上画检测框/类别/置信度，
+取到深度后补中心深度（mm），结果画面停留 `detector.show_seconds`（默认 2s）后自动继续——
+**空格/回车立即继续，q/ESC 中止任务**，`show_seconds: 0` 则必须按键才继续（人工确认门）。
+缺类重拍的每一轮都会重新弹窗；某颗深度无效时该框画红框+`DEPTH INVALID`，停留后才报错中止。
+无显示环境（SSH/无 DISPLAY）自动降级为无窗，不影响识别；命令行 `--show` 可在 yaml 关闭时
+强制开窗。
+
 注意：中心是检测框中心，未做孔轮廓精定位。沿用原点选工具的中心邻域深度策略，
 螺母孔可能测到桌面，需要现场核对抓取高度。主流程会在检测点变到 base_link 后统一加
 `motion.grasp_offset_xyz`（默认向机体方向退 15cm）补偿腕-指尖前后偏差（见「配置」一节），
@@ -145,7 +157,7 @@ confidence、imgsz、device、
 |---|---|---|
 | 0（一次） | 上使能 → 双手张开到 `hand.open`（保持 1s）→ 左右臂**各按一条预录 ready 轨迹**（`left.ready`/`right.ready`）先慢速接入 pt0、再逐点 MoveJ 回放到末点离场，打印 ready 末点目标/实际/误差并保持 | `nut_pick_place.initial_poses` 调 `SequenceRunner.run_leg`；可单独 `--execute --go-ready` 验证 |
 | 1（一次） | 双臂离场后视觉检测大/中/小，像素+深度→相机系→base 系 | `nut_detectors.py` + `camera_pick_move` 标定链路 |
-| 2 | 左臂 MoveJP 到螺母正上方（高 10cm）→ MoveL 竖直下探 → 按尺寸闭合 → MoveL 抬起；姿态三角度固定取 `left_grasp_init` | `nut_pick_place.run_one_nut` |
+| 2 | 左臂 MoveJP 到螺母正上方（高 10cm）→ MoveL 竖直下探 → 按尺寸闭合 → MoveL 抬起；姿态取该尺寸的 `grasp_orientation_by_size`（未配则 `left_grasp_init`） | `nut_pick_place.run_one_nut` |
 | 3 | 左臂回放 left_middle_grasp 段，终点张手放中央，再回放 left_middle_back 回位 | `nut_sequences.SequenceRunner.run_leg` |
 | 4 | 右臂回放 right_grasp_middle1 段到中央，段尾闭合重抓 | 同上，`hand_after: close` |
 | 5 | 右臂回放 right_middle_back1 段，段尾张手在右侧释放（当前三颗共用一条） | 同上，`hand_after: open` |
@@ -246,6 +258,26 @@ dry-run「交接点核对」超 20mm 标 ⚠。2026-09-10 切换新三段后此�
      point: 0        # left_grasp_middle pt0 eul≈[63.7,-1.3,-95.4]°（抓取区臂型）
    ```
 
+**按尺寸分别配置姿态与偏移（2026-09-11 起）**：大中小螺母可各自给抓取姿态和抓取几何，
+未配置的尺寸自动回退上面的全局值。dry-run 计划的「视觉抓取点偏移」「左臂视觉抓取姿态」
+两节按 l/m/s 逐行打印，覆盖项标注（覆盖全局）。
+
+- 姿态：`left.grasp_orientation_by_size`，键 l/m/s，值的写法与全局 `grasp_orientation`
+  完全相同（位姿库名或 `{file?, sequence, point?}`）。位姿名需先逐个采集，例如：
+
+  ```bash
+  python3 tools/capture_task_pose.py --arm left --name left_grasp_l --force
+  python3 tools/capture_task_pose.py --arm left --name left_grasp_m --force
+  python3 tools/capture_task_pose.py --arm left --name left_grasp_s --force
+  ```
+
+  注意按尺寸分的仍**只是三个欧拉角**；抓取点 xyz 永远来自视觉检测点 + 该尺寸偏移。
+  某个名字没采/段点不存在时，dry-run 该行打 ⚠，`--execute` 在任何运动前中止并报缺哪个尺寸。
+
+- 偏移/高度：`motion.grasp_by_size.<l/m/s>` 里 `offset_xyz` / `z_offset` / `hover_height`
+  三个字段任选，单位和含义与全局 `grasp_offset_xyz` / `grasp_z_offset` / `hover_height`
+  完全相同，逐字段回退（可以只覆盖某尺寸的 offset_xyz，其余仍用全局）。
+
 **IK 预检与种子**：hover/down 运动前都要过驱动实时逆解。驱动逆解是数值法、以请求里的
 关节角为初始种子（srv 注释明确），臂停在远处 ready 位时可能因种子不收敛而误报"逆解失败"。
 框架会依次用 当前关节角 → 左臂首段（现为 `left_middle_grasp_001`）pt0/末点的记录臂型 → 空种子
@@ -331,8 +363,20 @@ manual 点选窗口只在双臂到位后出现（避免臂挡住画面）。检�
 - `require_all`：缺螺母时 true=中止，false=只抓检测到的。
 - `detector.duplicate_policy`：同型号多颗时 `random`=随机抓一颗（当前配置）、
   `first`=第一颗、`abort`=中止（缺省）。
+- `detector.detect_attempts`：整轮识别后缺型号时，重新拍快照整体重识别的**轮数上限**
+  （含首轮，默认 3，范围 1~10，必须整数）；轮间等 `detector.missing_retry_seconds`
+  秒（默认 1.0，可设 0）。这是两层重试中的**业务层**：`inference_retries` 管单次识别内部
+  快照过期/推理失败的重取帧，`detect_attempts` 管识别成功但整类漏检后的整轮重拍；
+  `require_all: false` 时缺类允许跳过、不触发重试。螺母确实不在画面里时应改用 false 而不是
+  一味调大轮数。
+- `detector.show_window` / `detector.show_seconds`（YOLO）：识别阶段弹出实时窗口——等帧时
+  显示实时画面，出框后画检测框/置信度/中心深度；结果停留 show_seconds 自动继续，空格立即
+  继续、q 中止，0=必须按键确认；无 DISPLAY 自动不弹。命令行 `--show` 强制开窗。
 - `left.grasp_orientation`：视觉抓取姿态源——位姿库名字符串，或
   `{file?, sequence, point?}` 直接取记录段某点欧拉角（见上文「固定段」一节）。
+- `left.grasp_orientation_by_size`（可选）：l/m/s 各自的姿态源，写法同上；缺尺寸回退全局。
+- `motion.grasp_by_size`（可选）：l/m/s 各自的 `offset_xyz`/`z_offset`/`hover_height`
+  （三字段任选、逐字段回退全局），用于大中小螺母几何不同时分调，详见上文「固定段」一节。
 - `left.ready` / `right.ready`：开机 ready 段 `{file, sequence}`（纯运动，不许带 hand_after）；
   不配则开机直接慢速 MoveJ 到首任务段 pt0。改 ready 姿态只需改这里指向的序列。
 - `left.trace` / `right.trace`：该臂任务段的默认记录文件；段内可用 `file:` 覆盖。
@@ -414,7 +458,7 @@ python3 tools/nut_pick_place.py --detector external --order l
 | 文件 | 作用 |
 |---|---|
 | `开发资源/nut_sort/nut_task.yaml` | 任务配置：顺序、段映射、速度容差、三档手型、视觉/检测器 |
-| `开发资源/nut_sort/task_poses.yaml` | 位姿库；本版只需左臂 `left_grasp_init` |
+| `开发资源/nut_sort/task_poses.yaml` | 位姿库；左臂 `left_grasp_init`，按尺寸分姿态时再加 `left_grasp_l/m/s`（名字自定） |
 | `recordings/{left_grasp_middle1,left_middle_back,right_middle_grasp1,right_middle_back1}/events.jsonl` | 预录关节序列（schema v3，4 段任务段；旧 *1 前文件夹保留未引用） |
 | `recordings/left_trace2/events.jsonl` · `recordings/right_trace/events.jsonl` | 开机 ready 轨迹（左 `left_ready2_001` 3 点，末点 (257,390,-271)；右 `right_ready1_001` 3 点，末点 (426,-215,-175)；同文件里的旧试录段未被引用） |
 | `tools/record_workpoints.py` / `replay_workpoints.py` | 序列录制 / 单段预览回放 |
@@ -426,16 +470,17 @@ python3 tools/nut_pick_place.py --detector external --order l
 | `tools/nut_detector_example.py` | 自接检测器模板（只出像素的最简示例） |
 | `开发资源/nut_sort/nut_detector_ref.py` | 固定参考位姿桩（base_link 直给，联调用） |
 | `tools/nut_pick_place.py` | 主流程（默认 dry-run） |
-| `tools/test_nut_task.py` | 离线单测（73 项，含 ready 轨迹接入/无 ready 回退、停顿期持续 spin、关节到位补发+分臂容差+逐关节诊断、视觉笛卡尔位姿核对/补发/指令vs实际报错、速度倍率、记录段姿态源、多种子 IK+对照探针、终端输入检测器、同型号多目标 random/first/abort 策略、4 段真实任务段加载、共用 place、分臂闭合值、4 种检测结果形式、base 系直给、grasp_offset_xyz 腕部偏移配置与换算） |
-| `tools/test_nut_yolo.py` | 深度/内参/ROI/locate 换算 + 快照过期与推理失败的重取帧重试（11 项） |
+| `tools/test_nut_task.py` | 离线单测（82 项，含 ready 轨迹接入/无 ready 回退、停顿期持续 spin、关节到位补发+分臂容差+逐关节诊断、视觉笛卡尔位姿核对/补发/指令vs实际报错、速度倍率、记录段姿态源、多种子 IK+对照探针、终端输入检测器、同型号多目标 random/first/abort 策略、缺型号整轮重拍（detect_attempts/missing_retry_seconds）、识别弹窗配置校验、4 段真实任务段加载、共用 place、分臂闭合值、4 种检测结果形式、base 系直给、grasp_offset_xyz 腕部偏移、按尺寸姿态/偏移覆盖与回退、非法值校验） |
+| `tools/test_nut_yolo.py` | 深度/内参/ROI/locate 换算 + 重取帧重试 + annotate 画框 + DetectionWindow 弹窗生命周期/按键/超时/headless 降级（22 项） |
 | `tools/test_nut_yolo_live.py` | 配对取帧纯函数：积压跳帧、过期/失配拒绝、坏深度不掩盖另一检测（3 项） |
 
 ## 8. 安全
 
 - 默认 dry-run；`--execute` 才运动。首次执行清空桌面活动范围、手持急停，低速起调。
 - 运动前视觉点强制 IK 预检；服务/反馈缺失、未采 `left_grasp_init`、序列/关节名/frame
-  不一致、缺螺母（require_all），都在运动前中止；同尺寸多目标按
-  detector.duplicate_policy 处理（random/first 不中止，随机/取首颗继续，缺省 abort 中止）。
+  不一致、缺螺母（require_all，且 detect_attempts 轮重拍后仍缺），都在运动前中止；
+  同尺寸多目标按 detector.duplicate_policy 处理（random/first 不中止，随机/取首颗继续，
+  缺省 abort 中止）。
 - 回放中另一只臂发生漂移立即中止；异常后**不自动掉使能**，在途运动需现场确认。
 - 外参残差约 10.6mm；相机被碰过必须重新标定，每次启动都重读外参 yaml，换文件免操作。
 - 手型值先小力慢速空载验证，确认不夹线缆/盒壁。
@@ -446,5 +491,5 @@ python3 tools/nut_pick_place.py --detector external --order l
 cd tools
 source /opt/ros/jazzy/setup.bash && source ../install/setup.bash
 /usr/bin/python3 -m pytest test_nut_task.py test_nut_yolo.py test_nut_yolo_live.py -q
-# 当前共 87 项；只用 unittest 也可逐个文件跑
+# 当前共 107 项；只用 unittest 也可逐个文件跑
 ```

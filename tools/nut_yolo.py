@@ -15,6 +15,116 @@ from camera_pick_move import sample_depth, deproject
 
 WORKSPACE = Path(__file__).resolve().parents[1]
 
+WINDOW_NAME = 'nut YOLO detect (q/ESC=abort, space/enter=continue)'
+
+
+def _put_text(img, text, org, scale=.6, color=(0, 255, 255), thickness=2):
+    """putText 加黑边，彩图上可读；只写 ASCII（OpenCV 不含中文字库）。"""
+    import cv2
+    cv2.putText(img, text, org, cv2.FONT_HERSHEY_SIMPLEX, scale, (0, 0, 0), thickness + 2)
+    cv2.putText(img, text, org, cv2.FONT_HERSHEY_SIMPLEX, scale, color, thickness)
+
+
+def annotate(color, records, located=None, failed_label=None, status=None):
+    """彩色帧上画 YOLO 检测框；located（Detection 列表）补中心深度。
+
+    records：nut_yolo_infer 的输出字典列表（label/confidence/bbox/u/v）。
+    failed_label：该尺寸框中心深度无效时画红框。返回新图像，不改原图。
+    """
+    import cv2
+    canvas = color.copy()
+    by_center = {}
+    for det in (located or []):
+        by_center[(int(round(det.u)), int(round(det.v)))] = det
+    for r in records:
+        x1, y1, x2, y2 = [int(round(float(v))) for v in r['bbox']]
+        u, v = int(round(float(r['u']))), int(round(float(r['v'])))
+        label = str(r['label'])
+        bad = label == failed_label
+        box_color = (0, 0, 255) if bad else (0, 255, 0)
+        cv2.rectangle(canvas, (x1, y1), (x2, y2), box_color, 2)
+        cv2.drawMarker(canvas, (u, v), (0, 0, 255), cv2.MARKER_CROSS, 16, 2)
+        text = f"{label} {float(r['confidence']):.2f} ({u},{v})"
+        det = by_center.get((u, v))
+        if det is not None:
+            text += f" z={det.z * 1000:.0f}mm"
+        if bad:
+            text += ' DEPTH INVALID'
+        _put_text(canvas, text, (x1, max(18, y1 - 6)),
+                  color=(0, 0, 255) if bad else (0, 255, 255))
+    if status:
+        _put_text(canvas, str(status), (8, 24), scale=.55, color=(255, 255, 255))
+    return canvas
+
+
+class DetectionWindow:
+    """识别阶段的实时弹窗：等待帧期间显示实时画面，出结果后画检测框。
+
+    开关 detector.show_window（yaml/--show）；结果停留 show_seconds 秒后自动继续
+    （空格/回车立即继续，q/ESC 中止任务；show_seconds=0 则必须按键）。
+    无显示环境（headless/namedWindow 失败）自动降级为无窗，不影响识别。
+    """
+
+    def __init__(self, cfg, log=print):
+        self.enabled = bool(cfg.get('show_window', False))
+        try:
+            self.seconds = float(cfg.get('show_seconds', 2.0))
+        except (TypeError, ValueError):
+            self.enabled = False
+            self.seconds = 2.0
+        self.cv2 = None
+        if not self.enabled:
+            return
+        if not os.environ.get('DISPLAY'):
+            self.enabled = False
+            log('未检测到 DISPLAY，跳过识别弹窗（其余流程正常）')
+            return
+        try:
+            import cv2
+            cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
+            self.cv2 = cv2
+        except Exception as exc:  # 无 X/建窗失败：降级
+            self.enabled = False
+            log(f'识别弹窗不可用（{exc}），继续无窗流程')
+
+    def _show(self, img, wait_ms=1):
+        try:
+            self.cv2.imshow(WINDOW_NAME, img)
+            self.cv2.waitKey(wait_ms)
+        except Exception:
+            # 运行途中显示连接丢失：后续静默，不让弹窗影响识别本身
+            self.enabled = False
+
+    def live(self, frame, status='waiting synced color+depth pair ...'):
+        if self.enabled:
+            self._show(annotate(frame, [], status=status))
+
+    def result(self, color, records, located=None, failed_label=None, status=None):
+        if self.enabled:
+            self._show(annotate(color, records, located, failed_label, status))
+
+    def dwell(self):
+        """结果画面停留 show_seconds；q/ESC 中止，空格/回车立即放行。"""
+        if not self.enabled:
+            return
+        end = time.monotonic() + max(0.0, self.seconds)
+        while True:
+            key = self.cv2.waitKey(50) & 0xFF
+            if key in (ord('q'), 27):
+                raise TaskError('用户在识别窗口按 q/ESC，中止任务')
+            if key in (32, 13, 10):
+                return
+            if self.seconds > 0 and time.monotonic() >= end:
+                return
+
+    def close(self):
+        if self.cv2 is not None:
+            try:
+                self.cv2.destroyWindow(WINDOW_NAME)
+            except Exception:
+                pass
+
+
 
 def infer_pixels(image, cfg):
     import cv2
@@ -129,6 +239,7 @@ class YoloDetector:
         vision = self.cfg['_vision']
         max_age = float(self.cfg.get('max_frame_age', 1.))
         skew = float(self.cfg.get('max_skew', .1))
+        window = DetectionWindow(self.cfg)
 
         def receive(msg, target, encoding):
             stamp = msg.header.stamp.sec + msg.header.stamp.nanosec*1e-9
@@ -159,6 +270,8 @@ class YoloDetector:
                 end = time.monotonic()+timeout
                 while time.monotonic() < end:
                     rclpy.spin_once(self.node, timeout_sec=.05)
+                    if color:
+                        window.live(color[-1][2])  # 等待/重试期间持续刷新实时画面
                     now = time.monotonic()
                     pairs = [(c,d) for c in color for d in depth
                              if now-c[1] <= max_age and now-d[1] <= max_age and abs(c[0]-d[0]) <= skew]
@@ -166,17 +279,36 @@ class YoloDetector:
                         return min(pairs, key=lambda x: abs(x[0][0]-x[1][0]))
                 return None
 
-            records, (c, d) = resolve_records(self.cfg, wait_pair,
-                                              lambda img: infer_pixels(img, self.cfg))
+            def run_infer(img):
+                # 推理（CPU 冷启动可能十几秒）前给一帧带提示的画面，免得窗口像卡死
+                window.result(img, [], status='YOLO inferring (CPU cold start may take ~10s) ...')
+                return infer_pixels(img, self.cfg)
+
+            records, (c, d) = resolve_records(self.cfg, wait_pair, run_infer)
             if (camera['height'],camera['width']) != c[2].shape[:2]:
                 raise TaskError('camera_info 与彩色分辨率不匹配')
             if ext.get('parent_frame') != 'base_link' or ext.get('child_frame') != camera['frame_id']:
                 raise TaskError('外参坐标系与实时彩色相机不匹配，不能直接交给 base_link 抓取流程')
-            detections = locate(records, d[2], camera['K'], c[2].shape, self.cfg)
+            window.result(c[2], records,
+                          status=f'{len(records)} box(es), sampling aligned depth ...')
+            try:
+                detections = locate(records, d[2], camera['K'], c[2].shape, self.cfg)
+            except TaskError as exc:
+                failed_label = next((str(r['label']) for r in records
+                                     if str(exc).startswith(f"{r['label']} ")), None)
+                window.result(c[2], records, failed_label=failed_label,
+                              status='depth invalid at marked box center (aborting)')
+                window.dwell()
+                raise
+            n = len(detections)
+            window.result(c[2], records, located=detections,
+                          status=f'{n} nut(s) localized — auto in {window.seconds:g}s, space=go, q=abort')
+            window.dwell()
             self.snapshot = dict(color=c[2], depth=d[2], K=camera['K'],
                                  color_stamp=c[0], depth_stamp=d[0], frame_id=camera['frame_id'])
             return detections
         finally:
+            window.close()
             for sub in subs:
                 self.node.destroy_subscription(sub)
 

@@ -53,6 +53,37 @@ def _parse_leg_spec(arm, raw, default_trace):
     return resolve_ws(file_), str(raw['sequence']), hand_after, retreat
 
 
+def _parse_grasp_orientation(raw, where):
+    """grasp_orientation 的值 -> (位姿库名|None, 记录段映射|None)。
+
+    字符串=task_poses.yaml 里的位姿名（只取欧拉角）；
+    映射={file?, sequence, point?}=预录段某点的末端姿态。
+    """
+    if isinstance(raw, str) and raw:
+        return raw, None
+    if isinstance(raw, dict) and raw.get('sequence'):
+        point = int(raw.get('point', 0))
+        if point < 0:
+            raise TaskError(f'{where}.point 不能为负')
+        return None, {'file': raw.get('file'), 'sequence': str(raw['sequence']), 'point': point}
+    raise TaskError(f'{where} 必须是位姿名字符串，或 {{file?, sequence, point?}} 映射，'
+                    f'当前 {raw!r}')
+
+
+def _parse_grasp_offset(raw, where):
+    """检测点->腕部目标的 base_link 平移（米）；全局与按尺寸共用同一校验。"""
+    try:
+        off = [float(x) for x in raw]
+    except (TypeError, ValueError):
+        raise TaskError(f'{where} 必须是 3 个数（米），当前 {raw}')
+    if len(off) != 3 or not all(np.isfinite(off)):
+        raise TaskError(f'{where} 必须是 3 个有限数（米），当前 {raw}')
+    if np.linalg.norm(off) > 0.3:
+        raise TaskError(f'{where} 模长 {np.linalg.norm(off):.2f}m 过大'
+                        f'（上限 0.3m），确认单位是米而不是毫米')
+    return np.array(off)
+
+
 def _parse_ready_spec(arm, raw, default_trace):
     """left/right.ready -> leg 规格；不配返回 None。ready 是开机纯运动段，不许带手动作。"""
     if raw is None:
@@ -97,20 +128,18 @@ class TaskConfig:
         #   字符串  -> task_poses.yaml 里的位姿名（只取三欧拉角）
         #   映射    -> {sequence: 名, file?: 可选(默认 left.trace), point?: 点序号(默认0)}
         #              取预录段该点的末端姿态（如 left_grasp_middle pt0 的旋转角）
-        go = left.get('grasp_orientation', 'left_grasp_init')
-        self.grasp_orientation_rec = None
-        if isinstance(go, str):
-            self.left_grasp_pose_name = go
-        elif isinstance(go, dict) and go.get('sequence'):
-            point = int(go.get('point', 0))
-            if point < 0:
-                raise TaskError('left.grasp_orientation.point 不能为负')
-            self.left_grasp_pose_name = None
-            self.grasp_orientation_rec = {
-                'file': go.get('file'), 'sequence': str(go['sequence']), 'point': point}
-        else:
-            raise TaskError('left.grasp_orientation 必须是位姿名字符串，或 '
-                            '{file?, sequence, point?} 映射')
+        self.left_grasp_pose_name, self.grasp_orientation_rec = _parse_grasp_orientation(
+            left.get('grasp_orientation', 'left_grasp_init'), 'left.grasp_orientation')
+        # 按尺寸覆盖抓取姿态（l/m/s 可缺省 -> 回退全局姿态）
+        self.grasp_orientation_by_size = {}
+        go_size = left.get('grasp_orientation_by_size', {}) or {}
+        if not isinstance(go_size, dict):
+            raise TaskError('left.grasp_orientation_by_size 必须是 l/m/s 映射')
+        for k, v in go_size.items():
+            if k not in SIZE_LABELS:
+                raise TaskError(f'left.grasp_orientation_by_size 只允许 l/m/s 键，当前 {k!r}')
+            self.grasp_orientation_by_size[k] = _parse_grasp_orientation(
+                v, f'left.grasp_orientation_by_size.{k}')
         left_trace = left.get('trace', '')
         if not isinstance(left.get('legs'), list) or not left['legs']:
             raise TaskError('left.legs 必须是非空列表（视觉抓起后依次回放的段）')
@@ -167,17 +196,35 @@ class TaskConfig:
         # 而 pose_states/腕部（法兰）与指尖抓取中心有约 15cm 前后偏差：
         # 默认把腕部目标向机体方向（base_link -X）退 15cm，指尖才正好到螺母。
         # 三种检测器（manual/input/yolo/...）在变到 base_link 之后统一施加。
-        raw_off = m.get('grasp_offset_xyz', [-0.15, 0.0, 0.0])
-        try:
-            off = [float(x) for x in raw_off]
-        except (TypeError, ValueError):
-            raise TaskError(f'motion.grasp_offset_xyz 必须是 3 个数（米），当前 {raw_off}')
-        if len(off) != 3 or not all(np.isfinite(off)):
-            raise TaskError(f'motion.grasp_offset_xyz 必须是 3 个有限数（米），当前 {raw_off}')
-        if np.linalg.norm(off) > 0.3:
-            raise TaskError(f'motion.grasp_offset_xyz 模长 {np.linalg.norm(off):.2f}m 过大'
-                            f'（上限 0.3m），确认单位是米而不是毫米')
-        self.grasp_offset_xyz = np.array(off)
+        self.grasp_offset_xyz = _parse_grasp_offset(
+            m.get('grasp_offset_xyz', [-0.15, 0.0, 0.0]), 'motion.grasp_offset_xyz')
+        # 按尺寸覆盖（motion.grasp_by_size.<l/m/s>）：offset_xyz/z_offset/hover_height
+        # 三个字段都可省，省的回退上面的全局值；大中小螺母几何不同时分别微调。
+        self.grasp_by_size = {}
+        gb = m.get('grasp_by_size', {}) or {}
+        if not isinstance(gb, dict):
+            raise TaskError('motion.grasp_by_size 必须是 l/m/s 映射')
+        for k, v in gb.items():
+            if k not in SIZE_LABELS:
+                raise TaskError(f'motion.grasp_by_size 只允许 l/m/s 键，当前 {k!r}')
+            if not isinstance(v, dict):
+                raise TaskError(f'motion.grasp_by_size.{k} 必须是映射'
+                                f'（offset_xyz/z_offset/hover_height 任选）')
+            entry = {}
+            if 'offset_xyz' in v:
+                entry['offset_xyz'] = _parse_grasp_offset(
+                    v['offset_xyz'], f'motion.grasp_by_size.{k}.offset_xyz')
+            for fk in ('z_offset', 'hover_height'):
+                if fk in v:
+                    try:
+                        fv = float(v[fk])
+                    except (TypeError, ValueError):
+                        raise TaskError(f'motion.grasp_by_size.{k}.{fk} 必须是数（米），'
+                                        f'当前 {v[fk]!r}')
+                    if not np.isfinite(fv):
+                        raise TaskError(f'motion.grasp_by_size.{k}.{fk} 必须是有限数（米）')
+                    entry[fk] = fv
+            self.grasp_by_size[k] = entry
         self.join_speed = float(m.get('join_speed', 0.15))
         self.join_acce = float(m.get('join_acce', 0.15))
         self.sequence_speed = float(m.get('sequence_speed', 0.3))
@@ -302,6 +349,46 @@ class TaskConfig:
         if self.duplicate_policy not in ('abort', 'random', 'first'):
             raise TaskError('detector.duplicate_policy 只能是 abort/random/first，'
                             f'当前 {det.get("duplicate_policy")!r}')
+        # 整轮检测后缺型号时重新拍快照识别：最多 detect_attempts 轮（含首轮），
+        # 轮间隔 missing_retry_seconds 秒。YOLO 单帧偶发漏检时不必整任务中止。
+        raw_attempts = det.get('detect_attempts', 3)
+        if isinstance(raw_attempts, float) and not float(raw_attempts).is_integer():
+            raise TaskError(f'detector.detect_attempts 必须是整数轮数，当前 {raw_attempts!r}')
+        try:
+            self.detect_attempts = int(raw_attempts)
+        except (TypeError, ValueError):
+            raise TaskError(f'detector.detect_attempts 必须是整数，当前 {raw_attempts!r}')
+        if not 1 <= self.detect_attempts <= 10:
+            raise TaskError(f'detector.detect_attempts 必须在 1~10，当前 {self.detect_attempts}')
+        self.missing_retry_seconds = float(det.get('missing_retry_seconds', 1.0))
+        if self.missing_retry_seconds < 0:
+            raise TaskError('detector.missing_retry_seconds 不能为负')
+        # YOLO 识别阶段的实时弹窗（等待帧实时画面 + 检测框/深度结果）
+        raw_show = det.get('show_window', False)
+        if not isinstance(raw_show, bool):
+            raise TaskError(f'detector.show_window 必须是 true/false，当前 {raw_show!r}')
+        self.show_window = raw_show
+        try:
+            self.show_seconds = float(det.get('show_seconds', 2.0))
+        except (TypeError, ValueError):
+            raise TaskError(f'detector.show_seconds 必须是秒数，当前 {det.get("show_seconds")!r}')
+        if not 0 <= self.show_seconds <= 30:
+            raise TaskError('detector.show_seconds 必须在 0~30 秒（0=必须按键才继续）')
+
+    def grasp_orientation_for(self, label):
+        """label 尺寸的视觉抓取姿态源 (位姿库名|None, 记录段映射|None)：覆盖 > 全局。"""
+        ov = self.grasp_orientation_by_size.get(label)
+        return ov if ov is not None else (self.left_grasp_pose_name, self.grasp_orientation_rec)
+
+    def grasp_offset_for(self, label):
+        """label 尺寸的检测点->腕部目标平移：grasp_by_size 覆盖 > 全局。"""
+        return self.grasp_by_size.get(label, {}).get('offset_xyz', self.grasp_offset_xyz)
+
+    def grasp_z_offset_for(self, label):
+        return self.grasp_by_size.get(label, {}).get('z_offset', self.grasp_z_offset)
+
+    def hover_height_for(self, label):
+        return self.grasp_by_size.get(label, {}).get('hover_height', self.hover_height)
 
     def close_for(self, arm, label):
         """该臂抓 label 螺母时的 6 路闭合值：尺寸级 arm > 尺寸级 joint > 臂默认。"""
