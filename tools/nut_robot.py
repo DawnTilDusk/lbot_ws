@@ -163,6 +163,21 @@ class TaskConfig:
         self.linear_acce = float(m.get('linear_acce', 0.2))
         self.hover_height = float(m.get('hover_height', 0.10))
         self.grasp_z_offset = float(m.get('grasp_z_offset', 0.0))
+        # 检测点 -> 腕部目标的 base_link 系平移（米）。视觉/点选给的是螺母位置，
+        # 而 pose_states/腕部（法兰）与指尖抓取中心有约 15cm 前后偏差：
+        # 默认把腕部目标向机体方向（base_link -X）退 15cm，指尖才正好到螺母。
+        # 三种检测器（manual/input/yolo/...）在变到 base_link 之后统一施加。
+        raw_off = m.get('grasp_offset_xyz', [-0.15, 0.0, 0.0])
+        try:
+            off = [float(x) for x in raw_off]
+        except (TypeError, ValueError):
+            raise TaskError(f'motion.grasp_offset_xyz 必须是 3 个数（米），当前 {raw_off}')
+        if len(off) != 3 or not all(np.isfinite(off)):
+            raise TaskError(f'motion.grasp_offset_xyz 必须是 3 个有限数（米），当前 {raw_off}')
+        if np.linalg.norm(off) > 0.3:
+            raise TaskError(f'motion.grasp_offset_xyz 模长 {np.linalg.norm(off):.2f}m 过大'
+                            f'（上限 0.3m），确认单位是米而不是毫米')
+        self.grasp_offset_xyz = np.array(off)
         self.join_speed = float(m.get('join_speed', 0.15))
         self.join_acce = float(m.get('join_acce', 0.15))
         self.sequence_speed = float(m.get('sequence_speed', 0.3))
@@ -281,6 +296,12 @@ class TaskConfig:
         self.detector_json_path = jp if jp.is_absolute() else self.dir / jp
         self.detector_external = det.get('external', '') or ''
         self.detector_raw = det
+        # 同型号多目标（如两颗中螺母）时的策略：abort=中止（安全缺省）/
+        # random=随机抓一颗 / first=取检测结果列表里的第一颗
+        self.duplicate_policy = str(det.get('duplicate_policy', 'abort')).lower()
+        if self.duplicate_policy not in ('abort', 'random', 'first'):
+            raise TaskError('detector.duplicate_policy 只能是 abort/random/first，'
+                            f'当前 {det.get("duplicate_policy")!r}')
 
     def close_for(self, arm, label):
         """该臂抓 label 螺母时的 6 路闭合值：尺寸级 arm > 尺寸级 joint > 臂默认。"""

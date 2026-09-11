@@ -20,7 +20,7 @@ from nut_robot import (DEFAULT_CONFIG, PoseStore, SIZE_LABELS, TaskConfig,
 from nut_detectors import (DepthPixelDetector, Detection, InputDetector,
                            JsonDetector, normalize)
 from nut_sequences import Leg, SequenceRunner, load_leg
-from nut_pick_place import (cam_to_base, det_base_xyz, handoff_check,
+from nut_pick_place import (cam_to_base, det_base_xyz, grasp_points, handoff_check,
                             ik_diagnose, join_gap_rows, load_all_legs, parse_order,
                             resolve_grasp_euler, validate_detections)
 
@@ -197,7 +197,7 @@ class ConfigAndLegsTest(unittest.TestCase):
 
     def test_real_config_open_and_pacing(self):
         cfg = TaskConfig(DEFAULT_CONFIG)
-        self.assertEqual(cfg.hand_open_vals, [255, 80, 255, 255, 255, 255])
+        self.assertEqual(cfg.hand_open_vals, [200, 80, 255, 255, 255, 255])
         for attr in ('ready_hold_seconds', 'point_dwell_seconds',
                      'between_leg_seconds', 'pre_hand_seconds', 'hover_dwell_seconds'):
             self.assertGreater(getattr(cfg, attr), 0)
@@ -278,6 +278,33 @@ class ConfigAndLegsTest(unittest.TestCase):
             self._reload(lambda y: y['motion'].update(pose_pos_tolerance=0.06))
         with self.assertRaises(TaskError):
             self._reload(lambda y: y['motion'].update(pose_ori_tolerance=0.0))
+
+    def test_duplicate_policy_config(self):
+        # 缺省 abort（安全）；真实 yaml 已设 random
+        self.assertEqual(TaskConfig(self.yaml_path).duplicate_policy, 'abort')
+        self.assertEqual(TaskConfig(DEFAULT_CONFIG).duplicate_policy, 'random')
+        cfg = self._reload(lambda y: y['detector'].update(duplicate_policy='first'))
+        self.assertEqual(cfg.duplicate_policy, 'first')
+        with self.assertRaises(TaskError):
+            self._reload(lambda y: y['detector'].update(duplicate_policy='nearest'))
+
+    def test_grasp_offset_default_and_validation(self):
+        # 缺省向机体方向（base_link -X）退 15cm，补偿腕-指尖前后偏差
+        np.testing.assert_allclose(TaskConfig(self.yaml_path).grasp_offset_xyz,
+                                   [-0.15, 0, 0])
+        np.testing.assert_allclose(TaskConfig(DEFAULT_CONFIG).grasp_offset_xyz,
+                                   [-0.08, 0.02, 0])
+        cfg = self._reload(lambda y: y['motion'].update(
+            grasp_offset_xyz=[0, -0.02, 0.01]))
+        np.testing.assert_allclose(cfg.grasp_offset_xyz, [0, -0.02, 0.01])
+        zero = self._reload(lambda y: y['motion'].update(grasp_offset_xyz=[0, 0, 0]))
+        np.testing.assert_allclose(zero.grasp_offset_xyz, [0, 0, 0])
+        with self.assertRaises(TaskError):
+            self._reload(lambda y: y['motion'].update(grasp_offset_xyz=[-0.15, 0]))
+        with self.assertRaises(TaskError):
+            self._reload(lambda y: y['motion'].update(grasp_offset_xyz=[-150, 0, 0]))
+        with self.assertRaises(TaskError):
+            self._reload(lambda y: y['motion'].update(grasp_offset_xyz='x'))
 
     def test_reissue_count_default_and_validation(self):
         # 缺省补发 2 次（含首下共 3 次下发）；范围 0~5
@@ -473,7 +500,7 @@ class SharedPlaceRealRecordingTest(unittest.TestCase):
         left_legs, _, _, _, _, _ = load_all_legs(cfg)
         eul, src = resolve_grasp_euler(cfg, PoseStore(cfg.poses_path))
         self.assertIn('left_grasp_init', src)
-        np.testing.assert_allclose(np.degrees(eul), [65.22, -6.67, -89.0], atol=0.02)
+        np.testing.assert_allclose(np.degrees(eul), [40.0, -6.67, -95.0], atol=0.02)
 
         def m(y):
             y['left']['grasp_orientation'] = {
@@ -557,6 +584,33 @@ class PureLogicTest(unittest.TestCase):
         det_cam = Detection('l', np.zeros(3))
         np.testing.assert_allclose(det_base_xyz(det_cam, R, t), t)
 
+    def test_grasp_points_apply_base_offset_after_transform(self):
+        from types import SimpleNamespace
+        cfg = SimpleNamespace(grasp_offset_xyz=np.array([-0.15, 0.0, 0.0]),
+                              hover_height=0.10, grasp_z_offset=0.0)
+        R = np.diag([1., -1., 1.])
+        t = np.array([1., 2., 3.])
+        # 相机系结果：先外参变换到 base，再在 base 系向机体方向退 15cm
+        det_cam = Detection('l', np.array([0., 1., 0.]))
+        pb_raw, pb, hover, down = grasp_points(cfg, det_cam, R, t)
+        np.testing.assert_allclose(pb_raw, [1, 1, 3])
+        np.testing.assert_allclose(pb, [0.85, 1, 3])
+        np.testing.assert_allclose(hover, [0.85, 1, 3.1])
+        np.testing.assert_allclose(down, [0.85, 1, 3])
+        # base 直给（input/json frame=base_link）同样施加偏移，不走外参
+        det_base = Detection('m', np.array([0.378, 0.326, -0.348]),
+                             extra={'frame': 'base_link'})
+        pb_raw, pb, hover, down = grasp_points(cfg, det_base, R, t)
+        np.testing.assert_allclose(pb_raw, [0.378, 0.326, -0.348])
+        np.testing.assert_allclose(pb, [0.228, 0.326, -0.348])
+        # 零偏移 + z 微调时退化为原来的 hover/down 公式
+        cfg0 = SimpleNamespace(grasp_offset_xyz=np.zeros(3),
+                               hover_height=0.10, grasp_z_offset=-0.01)
+        _, pb, hover, down = grasp_points(cfg0, det_base, R, t)
+        np.testing.assert_allclose(pb, pb_raw)
+        np.testing.assert_allclose(hover, pb_raw + [0, 0, 0.10])
+        np.testing.assert_allclose(down, pb_raw + [0, 0, -0.01])
+
     def _dets(self, labels=SIZE_LABELS):
         pts = {'l': [-0.1, 0.0, 0.7], 'm': [0.0, 0.0, 0.7], 's': [0.1, 0.0, 0.7]}
         return [Detection(k, np.array(pts[k])) for k in labels]
@@ -571,6 +625,26 @@ class PureLogicTest(unittest.TestCase):
         with self.assertRaises(TaskError):
             validate_detections(cfg, [Detection('l', np.zeros(3)),
                                       Detection('l', np.ones(3))])
+
+    def test_duplicate_random_picks_one_and_continues(self):
+        from unittest import mock
+        cfg = _CfgStub(order=('l', 'm', 's'), require_all=False, policy='random')
+        d1, d2 = Detection('m', np.array([0., 0., 0.7])), \
+                 Detection('m', np.array([0.1, 0.1, 0.7]))
+        # 两颗同类：不中止，返回且只返回其中一颗；random.choice 选谁就用谁
+        with mock.patch('random.choice', side_effect=[d1, d2]):
+            self.assertIs(validate_detections(cfg, [d1, d2])['m'], d1)
+            self.assertIs(validate_detections(cfg, [d1, d2])['m'], d2)
+        # 其余尺寸正常入选
+        with mock.patch('random.choice', return_value=d1):
+            by = validate_detections(cfg, [d1, d2, Detection('l', np.zeros(3))])
+        self.assertEqual(set(by), {'l', 'm'})
+
+    def test_duplicate_first_picks_list_head(self):
+        cfg = _CfgStub(order=('l', 'm', 's'), require_all=False, policy='first')
+        d1, d2 = Detection('m', np.array([0., 0., 0.7])), \
+                 Detection('m', np.array([0.1, 0.1, 0.7]))
+        self.assertIs(validate_detections(cfg, [d1, d2])['m'], d1)
 
     def test_missing_required_aborts(self):
         cfg = _CfgStub(order=('l', 'm', 's'), require_all=True)
@@ -1127,9 +1201,10 @@ class DetectorAndStoreTest(unittest.TestCase):
 
 
 class _CfgStub:
-    def __init__(self, order, require_all):
+    def __init__(self, order, require_all, policy='abort'):
         self.order = tuple(order)
         self.require_all = require_all
+        self.duplicate_policy = policy
 
 
 if __name__ == '__main__':

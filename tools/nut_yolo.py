@@ -21,7 +21,7 @@ def infer_pixels(image, cfg):
     model = Path(cfg.get('model', 'weights/nut_best.pt')).expanduser()
     if not model.is_absolute():
         model = WORKSPACE / model
-    python = Path(cfg.get('python', '~/miniconda3/envs/nut-yolo/bin/python')).expanduser()
+    python = Path(cfg.get('python', str(WORKSPACE / '.venv-yolo/bin/python'))).expanduser()
     if not model.is_file() or not python.is_file():
         raise TaskError(f'找不到 YOLO 模型或解释器：{model}，{python}')
     with tempfile.TemporaryDirectory(prefix='nut_yolo_') as folder:

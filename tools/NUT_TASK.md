@@ -49,7 +49,8 @@ source /opt/ros/jazzy/setup.zsh
 /usr/bin/python3 tools/nut_yolo_live.py --device 0
 ```
 
-需要已启动彩色、对齐深度和彩色 camera_info。模型在 Conda 子进程中常驻，
+需要已启动彩色、对齐深度和彩色 camera_info。模型在独立 Python 子进程（venv/conda，
+见下文解释器说明）中常驻，
 后台推理只处理最新配对帧；窗口显示检测帧本身，不把旧框叠到新画面。
 左侧标注大/中/小和中心十字，右侧显示置信度、像素中心、相机 XYZ 与基座 XYZ（米）。
 深度无效的目标仍显示框，但不显示虚构坐标；断流或检测帧过期则隐藏旧坐标。
@@ -64,8 +65,17 @@ JSON 含彩色/深度消息时间戳，快照不应当作实时运动指令。
 
 工作区模型为 `weights/nut_best.pt`，来源和 SHA256 记录在 `weights/nut_best.json`。
 它是 61 张照片追加训练后的选定权重，独立照片测试仍有漏检/误检。
-ROS 系统 Python 负责相机与运动接口，`nut_yolo_infer.py` 子进程使用 Conda 的
-`nut-yolo` 环境执行 YOLO，两者不用安装到同一个 Python 环境。
+ROS 系统 Python 负责相机与运动接口，`nut_yolo_infer.py` 子进程用**独立解释器**执行
+YOLO（子进程环境剔除 PYTHONPATH/PYTHONHOME，与 ROS 完全隔离），解释器路径由
+`detector.python` 指定，两种已验证的装法：
+
+- **本机（lionheart，无 conda）**：工作区内 venv `.venv-yolo`（yaml 现指向它）。
+  Ubuntu 缺 `python3.12-venv` 且 PEP668 禁止 pip 装系统时的建法：
+  `python3 -m venv --without-pip .venv-yolo` → `curl get-pip.py | .venv-yolo/bin/python`
+  → `.venv-yolo/bin/pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu`
+  → `.venv-yolo/bin/pip install ultralytics`（CPU torch 2.14 + ultralytics 8.4.146 已验证，
+  对同一张快照的输出与 dawntildusk 完全一致）。
+- **dawntildusk**：Conda `nut-yolo` 环境（`~/miniconda3/envs/nut-yolo/bin/python`）。
 
 相机驱动先开启彩色和对齐深度（`depth_registration:=true`），再运行只读预览：
 
@@ -100,18 +110,26 @@ source install/setup.zsh
 ```
 
 执行路径：YOLO 框中心 -> 配对深度邻域中位数 -> 内参反投影 `p_cam` ->
-现有 `det_base_xyz` 外参换算 -> `run_one_nut` 左臂 hover/down -> 既有双臂序列。
-缺类或同类多目标由现有业务校验中止，不擅自选最高置信度目标。
+外参换算到 base_link 检测点 -> 加 `grasp_offset_xyz`（默认向机体退 15cm）得腕部目标 ->
+`run_one_nut` 左臂 hover/down -> 既有双臂序列（dry-run 打印、IK 预检、实机共用同一换算）。
+缺类由业务校验中止（require_all）；**同型号多目标不再硬中止**，按 yaml
+`detector.duplicate_policy` 处理（2026-09-11 起）：`random`（当前配置）随机抓同型号
+候选项里的一颗并打印选了第几颗/坐标，`first` 取检测结果列表第一颗，`abort` 保留旧的
+安全中止行为。注意随机策略不看置信度/位置——若同型号候选项里有明显误检框，优先调高
+`detector.confidence` 或布置时分开螺母，而不是指望随机策略绕开它。
 执行模式仍沿用现有行为：先使能并回 home，后检测及 IK 预检。
 
-`nut_task.yaml` 的 detector 段提供模型、Conda python、confidence、imgsz、device、
+`nut_task.yaml` 的 detector 段提供模型、推理解释器路径（python，本机为 `.venv-yolo`）、
+confidence、imgsz、device、
 可选原图像素 `roi` 等设置；默认仍是 manual，传 `--detector yolo` 切换。
 默认 CPU 推理，也可按机器情况设置 `device: '0'` 使用 GPU。
 实时模式采用当前彩色 camera_info，要求彩色/深度分辨率一致、消息时间差不超过 0.1s，
 接收帧龄不超过 1s；推理结果超过 10s 则拒绝。不同尺寸不会用简单缩放冒充深度对齐。
 
 注意：中心是检测框中心，未做孔轮廓精定位。沿用原点选工具的中心邻域深度策略，
-螺母孔可能测到桌面；输出不是自动修正后的指尖接触点，需要现场核对抓取高度。
+螺母孔可能测到桌面，需要现场核对抓取高度。主流程会在检测点变到 base_link 后统一加
+`motion.grasp_offset_xyz`（默认向机体方向退 15cm）补偿腕-指尖前后偏差（见「配置」一节），
+但该偏移只改腕部目标 xy，不会修正深度打在孔/桌面上造成的 z 误差。
 外参必须对应当前相机安装；纯预览坐标成功不等于实物抓取误差已经验证。
 
 ## 1. 执行流程与代码对应
@@ -306,6 +324,8 @@ manual 点选窗口只在双臂到位后出现（避免臂挡住画面）。检�
 
 - `order`：`[l,m,s]` / `[s,m,l]` / `[m,l,s]` 任意排列；命令行 `--order sml` 临时覆盖。
 - `require_all`：缺螺母时 true=中止，false=只抓检测到的。
+- `detector.duplicate_policy`：同型号多颗时 `random`=随机抓一颗（当前配置）、
+  `first`=第一颗、`abort`=中止（缺省）。
 - `left.grasp_orientation`：视觉抓取姿态源——位姿库名字符串，或
   `{file?, sequence, point?}` 直接取记录段某点欧拉角（见上文「固定段」一节）。
 - `left.ready` / `right.ready`：开机 ready 段 `{file, sequence}`（纯运动，不许带 hand_after）；
@@ -313,6 +333,12 @@ manual 点选窗口只在双臂到位后出现（避免臂挡住画面）。检�
 - `left.trace` / `right.trace`：该臂任务段的默认记录文件；段内可用 `file:` 覆盖。
 - `motion.hover_height`：螺母正上方抬高，默认 0.10m。
 - `motion.grasp_z_offset`：下探终点相对视觉点 z 的微调，想让指尖更低给负值（如 -0.01）。
+- `motion.grasp_offset_xyz`：**检测点（螺母位置）→ 腕部目标**的 base_link 系平移（米，
+  默认 `[-0.15, 0, 0]`）。视觉点选/YOLO 对准的是腕部（法兰），而指尖抓取中心在腕前约
+  15cm：腕部目标整体向机体方向（base_link 负 X，已由外参朝向核实）退 15cm 后指尖才正好
+  到螺母。三种检测器在变到 base_link 之后统一施加；dry-run 与执行日志会分别打印「检测点」
+  与「腕部抓取目标」。实测指尖偏差不是 15cm 就改这三个数（单位米），不要偏移就设全 0。
+  hover/down 都以补偿后的腕部目标为基准，IK 预检同样使用补偿后坐标。
 - `motion.sequence_speed/acce`：预录段逐点 MoveJ 速度（≤0.5）；`join_speed/acce`：
   段间接入与 retreat 回 home 的慢速（≤0.3）。首调保持默认低值。
   命令行 `--speed N` 给整体倍率（视觉 MoveJP/MoveL、接入、逐点的速度加速度一起缩放，
@@ -387,6 +413,7 @@ python3 tools/nut_pick_place.py --detector external --order l
 | `recordings/{left_grasp_middle1,left_middle_back,right_middle_grasp1,right_middle_back1}/events.jsonl` | 预录关节序列（schema v3，4 段任务段；旧 *1 前文件夹保留未引用） |
 | `recordings/left_trace2/events.jsonl` · `recordings/right_trace/events.jsonl` | 开机 ready 轨迹（左 `left_ready2_001` 3 点，末点 (257,390,-271)；右 `right_ready1_001` 3 点，末点 (426,-215,-175)；同文件里的旧试录段未被引用） |
 | `tools/record_workpoints.py` / `replay_workpoints.py` | 序列录制 / 单段预览回放 |
+| `tools/retune_waypoint.py` | 微调记录点末端 xyz **和/或姿态**（默认末点）：`--dx/--dy/--dz`（米）+ `--drx/--dry/--drz`（度，xyz 欧拉角增量），驱动 IK 多种子选最近臂型 + FK 复核，关节角与 pose 快照一起回写并自动备份；只算不动。如左臂中央释放末点降 0.6cm：`--file recordings/left_grasp_middle1/events.jsonl --sequence left_middle_grasp_001 --arm left --dz -0.006`；右臂中央重抓末点俯仰多压 5°：`...right_middle_grasp1... right_grasp_middle1_001 --arm right --drx -5` |
 | `tools/capture_task_pose.py` | 位姿采集（当前实到位姿 → yaml） |
 | `tools/nut_robot.py` | 配置/位姿库/双臂运动服务/灵巧手封装 |
 | `tools/nut_sequences.py` | 段（Leg）加载、交接点核对、SequenceRunner 回放 |
@@ -394,13 +421,14 @@ python3 tools/nut_pick_place.py --detector external --order l
 | `tools/nut_detector_example.py` | 自接检测器模板（只出像素的最简示例） |
 | `开发资源/nut_sort/nut_detector_ref.py` | 固定参考位姿桩（base_link 直给，联调用） |
 | `tools/nut_pick_place.py` | 主流程（默认 dry-run） |
-| `tools/test_nut_task.py` | 离线单测（67 项，含 ready 轨迹接入/无 ready 回退、停顿期持续 spin、关节到位补发+分臂容差+逐关节诊断、视觉笛卡尔位姿核对/补发/指令vs实际报错、速度倍率、记录段姿态源、多种子 IK+对照探针、终端输入检测器、4 段真实任务段加载、共用 place、分臂闭合值、4 种检测结果形式、base 系直给） |
+| `tools/test_nut_task.py` | 离线单测（73 项，含 ready 轨迹接入/无 ready 回退、停顿期持续 spin、关节到位补发+分臂容差+逐关节诊断、视觉笛卡尔位姿核对/补发/指令vs实际报错、速度倍率、记录段姿态源、多种子 IK+对照探针、终端输入检测器、同型号多目标 random/first/abort 策略、4 段真实任务段加载、共用 place、分臂闭合值、4 种检测结果形式、base 系直给、grasp_offset_xyz 腕部偏移配置与换算） |
 
 ## 8. 安全
 
 - 默认 dry-run；`--execute` 才运动。首次执行清空桌面活动范围、手持急停，低速起调。
 - 运动前视觉点强制 IK 预检；服务/反馈缺失、未采 `left_grasp_init`、序列/关节名/frame
-  不一致、缺螺母（require_all）、同尺寸多目标，都在运动前中止。
+  不一致、缺螺母（require_all），都在运动前中止；同尺寸多目标按
+  detector.duplicate_policy 处理（random/first 不中止，随机/取首颗继续，缺省 abort 中止）。
 - 回放中另一只臂发生漂移立即中止；异常后**不自动掉使能**，在途运动需现场确认。
 - 外参残差约 10.6mm；相机被碰过必须重新标定，每次启动都重读外参 yaml，换文件免操作。
 - 手型值先小力慢速空载验证，确认不夹线缆/盒壁。

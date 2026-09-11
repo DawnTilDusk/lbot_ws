@@ -44,6 +44,21 @@ def det_base_xyz(det, R_BTC, t_BTC):
     return cam_to_base(det.p_cam, R_BTC, t_BTC)
 
 
+def grasp_points(cfg, det, R_BTC, t_BTC):
+    """一条检测 -> (检测点 base, 腕部抓取目标 base, hover, down)。
+
+    pb_raw 是视觉给出的螺母位置（base_link 系）；腕部目标 = 螺母位置 +
+    cfg.grasp_offset_xyz（默认向机体方向 -X 退 15cm 的腕-指尖偏差补偿）。
+    hover/down 都以补偿后的腕部目标为基准：hover 竖直高 hover_height，
+    down 竖直偏 grasp_z_offset。dry-run 打印、IK 预检、实机抓取必须共用此函数。
+    """
+    pb_raw = det_base_xyz(det, R_BTC, t_BTC)
+    pb = pb_raw + cfg.grasp_offset_xyz
+    hover = pb + np.array([0, 0, cfg.hover_height])
+    down = pb + np.array([0, 0, cfg.grasp_z_offset])
+    return pb_raw, pb, hover, down
+
+
 def parse_order(text):
     """'sml' / 's,m,l' -> ['s','m','l']。"""
     chars = text.replace(',', ' ').replace('_', ' ').split()
@@ -90,17 +105,39 @@ def load_all_legs(cfg):
 
 
 def validate_detections(cfg, detections):
+    """按 order 每类选一颗。同型号多目标按 detector.duplicate_policy 处理：
+    abort（缺省）= 中止；random = 随机选一颗；first = 取列表第一颗。"""
+    import random
+    policy = getattr(cfg, 'duplicate_policy', 'abort')
     by_label = {}
     for det in detections:
         by_label.setdefault(det.label, []).append(det)
-    for label, dets in by_label.items():
+    chosen = {}
+    for label in cfg.order:
+        dets = by_label.get(label, [])
+        if not dets:
+            continue
         if len(dets) > 1:
-            raise TaskError(f'{SIZE_NAMES_CN[label]}螺母检测到 {len(dets)} 个目标，无法决定抓哪个')
+            if policy == 'abort':
+                raise TaskError(
+                    f'{SIZE_NAMES_CN[label]}螺母检测到 {len(dets)} 个目标，无法决定抓哪个'
+                    f'（detector.duplicate_policy=abort；改成 random 可随机抓一颗）')
+            if policy == 'random':
+                pick = random.choice(dets)
+            else:  # first
+                pick = dets[0]
+            # 不能用 list.index：Detection 含 ndarray，== 比较会触发真值歧义
+            idx = next(i for i, d in enumerate(dets) if d is pick) + 1
+            print(f'  {SIZE_NAMES_CN[label]}螺母检测到 {len(dets)} 个，按策略 {policy} '
+                  f'抓第 {idx}/{len(dets)} 个 p_cam={np.round(pick.p_cam * 1000, 1)}mm')
+            chosen[label] = pick
+        else:
+            chosen[label] = dets[0]
     missing = [k for k in cfg.order if k not in by_label]
     if missing and cfg.require_all:
         raise TaskError('缺少螺母检测结果：' + '、'.join(SIZE_NAMES_CN[k] for k in missing)
                         + '（require_all=true；配置改 false 可跳过）')
-    return {k: by_label[k][0] for k in cfg.order if k in by_label}
+    return chosen
 
 
 # ---------------- dry-run 打印 -----------------------------------------------
@@ -220,6 +257,10 @@ def print_plan(cfg, store, left_legs, appr, places, release_leg, detections, R_B
                 f'{cfg.reached_reissue_count} 次；视觉 MoveJP/MoveL 末端容差 '
                 f'{cfg.pose_pos_tolerance * 1000:.0f}mm/{np.degrees(cfg.pose_ori_tolerance):.1f}°')
     print(f'  【{tol_txt}】')
+    off_mm = np.round(cfg.grasp_offset_xyz * 1000, 1)
+    if np.linalg.norm(off_mm) > 0.1:
+        print(f'  【视觉抓取点偏移】检测点(螺母位置) -> 腕部目标：{off_mm} mm'
+              f'（base_link 系；负 X=向机体方向，补偿腕-指尖前后偏差）')
     print(f'  【手型】张开 {cfg.hand_open_vals}；闭合值（顺序[拇指侧摆,拇指弯曲,食,中,无名,小]）')
     for k in cfg.order:
         print(f'    {SIZE_NAMES_CN[k]}({k}): 左 {cfg.close_for("left", k)}  '
@@ -247,18 +288,24 @@ def print_plan(cfg, store, left_legs, appr, places, release_leg, detections, R_B
                 print(f'    {SIZE_NAMES_CN[label]}螺母({label}): 未检测到（{why}）')
                 continue
             if len(dets) > 1:
-                print(f'    {SIZE_NAMES_CN[label]}螺母({label}): 检测到 {len(dets)} 个（执行时将中止）')
+                policy = getattr(cfg, 'duplicate_policy', 'abort')
+                what = {'abort': '执行时将中止', 'random': '执行时随机抓其中一颗',
+                        'first': '执行时取第一颗'}[policy]
+                print(f'    {SIZE_NAMES_CN[label]}螺母({label}): 检测到 {len(dets)} 个（{what}）')
             det = dets[0]
             in_base = det.extra.get('frame') in ('base', 'base_link')
-            pb = det_base_xyz(det, R_BTC, t_BTC)
-            hover = pb + np.array([0, 0, cfg.hover_height])
-            down = pb + np.array([0, 0, cfg.grasp_z_offset])
+            pb_raw, pb, hover, down = grasp_points(cfg, det, R_BTC, t_BTC)
             if in_base:
-                print(f'    {SIZE_NAMES_CN[label]}螺母({label}) base={np.round(pb*1000,1)} mm'
-                      f'（视觉直给，未走外参）')
+                print(f'    {SIZE_NAMES_CN[label]}螺母({label}) 检测点 base='
+                      f'{np.round(pb_raw*1000,1)} mm（视觉直给，未走外参）')
             else:
                 print(f'    {SIZE_NAMES_CN[label]}螺母({label}) p_cam={np.round(det.p_cam*1000,1)} mm')
-                print(f'      base={np.round(pb*1000,1)} mm（外参变换）')
+                print(f'      检测点 base={np.round(pb_raw*1000,1)} mm（外参变换）')
+            off_mm = np.round(cfg.grasp_offset_xyz * 1000, 1)
+            if np.linalg.norm(off_mm) > 0.1:
+                print(f'      腕部目标 = 检测点 + 偏移 {off_mm} mm（grasp_offset_xyz，'
+                      f'负 X=向机体退，补偿腕-指尖偏差）')
+            print(f'      腕部抓取目标 -> {np.round(pb*1000,1)}')
             print(f'      MoveJP hover(+{cfg.hover_height*1000:.0f}mm) -> {np.round(hover*1000,1)}')
             print(f'      MoveL down({cfg.grasp_z_offset*1000:+.0f}mm) -> {np.round(down*1000,1)}')
     else:
@@ -336,14 +383,14 @@ def initial_poses(cfg, runner, left_legs, appr, left, right,
 
 def run_one_nut(cfg, runner, left, right, label, det, eul_left, R_BTC, t_BTC,
                 left_legs, appr, places):
-    pb = det_base_xyz(det, R_BTC, t_BTC)
-    hover = pb + np.array([0, 0, cfg.hover_height])
-    down = pb + np.array([0, 0, cfg.grasp_z_offset])
+    pb_raw, pb, hover, down = grasp_points(cfg, det, R_BTC, t_BTC)
 
     def dwell(sec, what):
         runner._dwell(sec, what)
 
     print(f'==== {SIZE_NAMES_CN[label]}螺母({label}) ====')
+    print(f'  检测点(螺母) {np.round(pb_raw * 1000, 1)}mm -> 腕部目标'
+          f'{np.round(pb * 1000, 1)}mm（偏移 {np.round(cfg.grasp_offset_xyz * 1000, 1)}mm）')
     print(f'  [左] MoveJP 到螺母正上方 {np.round(hover * 1000, 1)}mm...')
     runner._goto_pose(left, hover, eul_left, f'{SIZE_NAMES_CN[label]}螺母 hover 悬停')
     dwell(cfg.hover_dwell_seconds, '悬停确认，准备下探')
@@ -487,12 +534,13 @@ def execute(cfg, store, R_BTC, t_BTC, K, left_legs, appr, places, release_leg,
             if label not in by_label:
                 continue
             det = by_label[label]
-            pb = det_base_xyz(det, R_BTC, t_BTC)
+            pb_raw, pb, hover, down = grasp_points(cfg, det, R_BTC, t_BTC)
             frame = det.extra.get('frame') in ('base', 'base_link')
-            print(f'  {SIZE_NAMES_CN[label]}({label}) base={np.round(pb*1000,1)} mm'
-                  f'（{"视觉直给" if frame else "外参变换"}）')
-            for pt, tag in ((pb + [0, 0, cfg.hover_height], 'hover'),
-                            (pb + [0, 0, cfg.grasp_z_offset], 'down')):
+            print(f'  {SIZE_NAMES_CN[label]}({label}) 检测点 base='
+                  f'{np.round(pb_raw*1000,1)} mm（{"视觉直给" if frame else "外参变换"}）')
+            print(f'    腕部目标(+偏移{np.round(cfg.grasp_offset_xyz*1000,1)}mm)='
+                  f'{np.round(pb*1000,1)} mm')
+            for pt, tag in ((hover, 'hover'), (down, 'down')):
                 ok, used = left.ik_check(pt, eul_left, extra_seeds=ik_seeds)
                 if ok:
                     print(f'    {tag} {np.round(pt*1000,1)} 逆解通过（种子：{seed_names[used]}）')
@@ -546,16 +594,13 @@ def main():
     p.add_argument('--arm', choices=('left', 'right'), default=None,
                    help='只影响 capture_task_pose 默认臂；任务固定双臂')
     p.add_argument('--order', type=parse_order, default=None)
-<<<<<<< HEAD
-    p.add_argument('--detector', choices=('manual', 'json', 'external', 'yolo'), default=None)
-=======
-    p.add_argument('--detector', choices=('manual', 'json', 'external', 'input'),
+    p.add_argument('--detector', choices=('manual', 'json', 'external', 'input', 'yolo'),
                    default=None,
-                   help="input=临时联调：终端手动输入三颗螺母 base_link 位置，不走相机")
+                   help="input=临时联调：终端手动输入三颗螺母 base_link 位置，不走相机；"
+                        "yolo=实时彩色/对齐深度快照 + YOLO 识别")
     p.add_argument('--speed', type=float, default=1.0, metavar='N',
                    help='整体速度倍率（相对 yaml，如 1.5=提速 50%%，0.5=减半），'
                         '同时缩放视觉 MoveJP/MoveL、段间接入、序列逐点的速度与加速度')
->>>>>>> c94ce4d (Calibration_renew, Whole_process)
     p.add_argument('--execute', action='store_true')
     p.add_argument('--go-ready', action='store_true',
                    help='真机只做开机动作（使能/张开手/回 ready）后退出，便于单独验证')
@@ -599,15 +644,11 @@ def main():
                     grasp_eul, grasp_src, ready_left, ready_right)
         else:
             detections = []
-<<<<<<< HEAD
             if cfg.detector_type == 'yolo':
                 from nut_yolo import detect_once
                 detections, _ = detect_once(cfg)
                 validate_detections(cfg, detections)
-            if cfg.detector_type in ('json', 'external'):
-=======
             if cfg.detector_type in ('json', 'external', 'input'):
->>>>>>> c94ce4d (Calibration_renew, Whole_process)
                 from nut_detectors import build_detector
                 detector = build_detector(cfg, None, K)
                 detections = detector.detect(cfg.order)

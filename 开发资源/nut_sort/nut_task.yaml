@@ -65,7 +65,11 @@ motion:
   linear_speed: 0.2
   linear_acce: 0.2
   hover_height: 0.10        # 视觉点正上方悬停高度 m（高出螺母 10cm，可调）
-  grasp_z_offset: 0.0       # 下探终点相对视觉点 z 微调，要指尖更低给负值如 -0.01
+  grasp_z_offset: 0.1      # 下探终点相对视觉点 z 微调，要指尖更低给负值如 -0.01
+  # 检测点(螺母位置) -> 腕部目标的 base_link 系平移 m，三种检测器统一生效。
+  # 视觉点选对准的是腕部（法兰），指尖抓取中心在腕前约 15cm：
+  # 腕部目标向机体方向（base_link -X）退 15cm，指尖才正好到螺母。实测后按毫米微调这三个数。
+  grasp_offset_xyz: [-0.08, 0.02, 0.00]
 
   # 序列段：逐点 MoveJ
   join_speed: 0.15          # 接入序列起点 / retreat 回 home 的慢速 MoveJ
@@ -80,7 +84,7 @@ motion:
 
   # 节奏停顿（嫌衔接快就调大这些）
   ready_hold_seconds: 1.0   # 开机双臂到 ready 后保持多久再检测
-  point_dwell_seconds: 0.2  # 预录序列每个点到位后停顿
+  point_dwell_seconds: 0.05  # 预录序列每个点到位后停顿
   between_leg_seconds: 0.8  # 段与段之间 / 螺母之间
   pre_hand_seconds: 0.3     # 发张/合手指令前停顿
   hover_dwell_seconds: 0.5  # 视觉段到螺母上方后、竖直下探前停顿
@@ -101,11 +105,11 @@ hand:
   speed: [80, 80, 80, 80, 80, 80]
   force: [100, 100, 100, 100, 100, 100]
   # 张开手型（2026-09-10 现场给定）：[拇指侧摆,拇指弯曲,食,中,无名,小]
-  open: [255, 80, 255, 255, 255, 255]
+  open: [200, 80, 255, 255, 255, 255]
   # 各臂闭合默认值（2026-09-10 现场给定，三颗螺母先共用；当晚小拇指也改为闭合 0，原 255 为张开）
   close:
     left:  [0, 40, 0, 0, 0, 0]
-    right: [0, 40, 0, 0, 0, 0]  # 与左臂相同（侧摆 0、弯曲 40；原 80 弯曲已弃用）
+    right: [0, 0, 0, 0, 0, 0]  # 与左臂相同（侧摆 0、弯曲 40；原 80 弯曲已弃用）
   # 若某尺寸要单独手型，按尺寸覆盖（优先级高于 close），三种写法：
   # sizes:
   #   l: {joint: [180, 180, 180, 180, 180, 180]}          # 双臂共用
@@ -132,7 +136,9 @@ detector:
   type: manual
   # 主流程 --detector yolo 启用；模型路径相对工作区。
   model: weights/nut_best.pt
-  python: ~/miniconda3/envs/nut-yolo/bin/python
+  # 推理子进程解释器（与 ROS 系统 Python 隔离）：本机用工作区内独立 venv，
+  # 不含 ROS 扩展；子进程环境已剔除 PYTHONPATH/PYTHONHOME。
+  python: /home/lionheart/Project/1_Competition/THUEI/Build_ws/lbot_ws/.venv-yolo/bin/python
   confidence: 0.5
   imgsz: 640
   device: cpu
@@ -145,4 +151,7 @@ detector:
   json_path: detections.json
   params: 开发资源/nut_sort/nut_vision.yaml
   pick: leftmost
+  # 同型号多目标（如画面里两颗中螺母/两颗小螺母）：
+  #   random=随机抓一颗继续（当前选用）；first=取检测结果第一颗；abort=中止（缺省安全行为）
+  duplicate_policy: random
   external: '/home/lionheart/Project/1_Competition/THUEI/Build_ws/lbot_ws/开发资源/nut_sort/nut_vision_detector.py:NutVisionDetector'
