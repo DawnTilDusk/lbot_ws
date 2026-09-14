@@ -17,11 +17,15 @@ def main():
     p.add_argument('--imgsz', type=int, default=640)
     p.add_argument('--device', default='cpu')
     args = p.parse_args()
+    import torch
+    if args.device == 'auto':
+        args.device = '0' if torch.cuda.is_available() else 'cpu'
+    print(f'推理设备：{args.device}', file=sys.stderr, flush=True)
     from ultralytics import YOLO
     with redirect_stdout(sys.stderr):
         model = YOLO(args.model)
-    mapping = {'large': 'l', 'medium': 'm', 'small': 's'}
-    if set(model.names.values()) != set(mapping):
+    mapping = {'large': 'l', 'medium': 'm', 'small': 's', 'white': 'white'}
+    if set(model.names.values()) not in ({'large', 'medium', 'small'}, set(mapping)):
         raise ValueError(f'模型类别不匹配：{model.names}')
     if args.serve:
         for line in sys.stdin:
@@ -40,6 +44,9 @@ def main():
 
 
 def predict(model, image, args, mapping):
+    if str(image).endswith('.npy'):
+        import numpy as np
+        image = np.load(image, allow_pickle=False)
     result = model.predict(image, conf=args.conf, imgsz=args.imgsz,
                            device=args.device, verbose=False)[0]
     records = []
