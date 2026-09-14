@@ -94,6 +94,20 @@ def coordinates(records, pair, info, R, t, ext, cfg):
     return rows
 
 
+def preview_result(result, now, fresh, age_limit, result_limit):
+    """延迟检测只能画在原检测帧上；过期三维坐标不可作为实时坐标显示。"""
+    if result is None:
+        return None
+    pair, rows = result
+    age = now-min(pair[0][1], pair[1][1])
+    if not fresh or age > result_limit:
+        return None
+    if age > age_limit:
+        rows = [dict({k: v for k, v in row.items() if k not in ('p_cam', 'p_base', 'z')},
+                     error='检测帧已过期，三维坐标已隐藏') for row in rows]
+    return pair, rows, age
+
+
 def render(frame, rows, status, font):
     canvas=frame.copy()
     for r in rows:
@@ -155,6 +169,7 @@ def main():
     node.create_subscription(CameraInfo,cfg.color_info_topic,camera,qos_profile_sensor_data)
     worker=None;executor=ThreadPoolExecutor(max_workers=1);future=None
     started=time.monotonic();last_stamp=-1;result=None;pending=None;updates=0;fps=0.
+    last_report=-float('inf')
     age_limit=float(options.get('max_frame_age',1));result_limit=float(options.get('max_result_age',10))
     args.output.mkdir(parents=True,exist_ok=False)
     def save(view,rows,pair):
@@ -162,6 +177,7 @@ def main():
         if not cv2.imwrite(str(args.output/f'{stamp}.jpg'),view):raise TaskError('保存画面失败')
         (args.output/f'{stamp}.json').write_text(json.dumps(dict(detections=rows,color_stamp=pair[0][0],depth_stamp=pair[1][0]),ensure_ascii=False,indent=2))
     print('正在加载模型；q/ESC 退出，s 保存当前检测图及坐标。仅订阅相机。',flush=True)
+    print(f'模型：{options.get("model", "weights/nut_best.pt")} | device={options.get("device", "cpu")} | conf={options.get("confidence", .5)}',flush=True)
     try:
         worker=Worker(options)
         while rclpy.ok() and (not args.duration or time.monotonic()-started<args.duration):
@@ -178,13 +194,23 @@ def main():
                     last_stamp=pair[0][0];pending=(pair,dict(info),now)
                     future=executor.submit(worker.infer,pair[0][2])
             fresh=bool(colors and depths) and now-colors[-1][1]<=age_limit and now-depths[-1][1]<=age_limit
-            usable=result is not None and fresh and now-min(result[0][0][1],result[0][1][1])<=age_limit
-            if usable:
-                pair,rows=result
-                view=render(pair[0][2],rows,f'{fps:.1f} 次/秒 | 帧龄 {now-pair[0][1]:.2f}s',font)
+            preview=preview_result(result,now,fresh,age_limit,result_limit)
+            usable=preview is not None and preview[2]<=age_limit
+            if preview is not None:
+                pair,rows,age=preview
+                status=f'{fps:.1f} 次/秒 | {len(rows)} 个目标 | 帧龄 {age:.2f}s'
+                if not usable:status+='\n延迟检测原帧（非实时）；坐标已隐藏'
+                view=render(pair[0][2],rows,status,font)
             else:
                 frame=colors[-1][2] if colors else np.zeros((720,1280,3),np.uint8)
-                view=render(frame,[],'等待新鲜配对帧/推理；旧坐标已隐藏',font)
+                if not colors or now-colors[-1][1]>age_limit:status='等待彩色图像：'+cfg.color_topic
+                elif not depths or now-depths[-1][1]>age_limit:status='等待深度图像：'+cfg.depth_topic
+                elif not info:status='等待相机内参：'+cfg.color_info_topic
+                elif future is not None:status=f'正在推理：{now-pending[2]:.1f}s；旧坐标已隐藏'
+                else:status='等待同步彩色/深度帧；旧坐标已隐藏'
+                view=render(frame,[],status,font)
+            if now-last_report>=2:
+                print(status.replace('\n',' | '),flush=True);last_report=now
             if not args.no_preview:
                 cv2.imshow('YOLO live | q quit | s save',cv2.resize(view,None,fx=args.scale,fy=args.scale))
                 key=cv2.waitKey(1)&255

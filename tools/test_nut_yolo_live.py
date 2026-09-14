@@ -1,9 +1,23 @@
 import unittest
 import numpy as np
-from nut_yolo_live import choose_pair, coordinates
+from nut_yolo_live import choose_pair, coordinates, preview_result
 
 
 class LiveTests(unittest.TestCase):
+    def test_delayed_detection_keeps_boxes_on_original_frame_but_hides_coordinates(self):
+        pair=((1,10,object()),(1,10,object()))
+        rows=[dict(bbox=[1,2,3,4],p_cam=[0,0,1],p_base=[1,0,0],z=1)]
+        shown=preview_result((pair,rows),12,True,1,10)
+        self.assertIs(shown[0],pair)
+        self.assertEqual(shown[1][0]['bbox'],rows[0]['bbox'])
+        self.assertNotIn('p_cam',shown[1][0])
+        self.assertNotIn('p_base',shown[1][0])
+        self.assertNotIn('z',shown[1][0])
+        self.assertIn('p_cam',rows[0])
+        self.assertIs(preview_result((pair,rows),10.5,True,1,10)[1],rows)
+        self.assertIsNone(preview_result((pair,rows),21,True,1,10))
+        self.assertIsNone(preview_result((pair,rows),10.5,False,1,10))
+
     def test_latest_pair_skips_backlog(self):
         colors=[(1.,9.5,None),(2.,9.8,None)]
         depths=[(1.01,9.5,None),(2.04,9.8,None)]

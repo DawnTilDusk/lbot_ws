@@ -1,8 +1,28 @@
 {
-  "source": "/home/dawntildusk/nut_vision/runs/nuts_all61_20260910_225515/weights/best.pt",
-  "sha256": "ba48f59e7d8f2f3e065d8275bf30c27547895c505dcd70060885e0ddd79fac64",
-  "classes": {"0": "large", "1": "medium", "2": "small"},
-  "training_images": 61,
-  "additional_epochs": 100,
-  "note": "当前选定模型；并非经独立测试集证明的最优模型。"
+  "source": "/home/dawntildusk/nut_vision/runs/nuts_mixed_20260914/weights/best.pt",
+  "sha256": "e3cef593ccc4342e6b5adf0af281e50971187e081a5247ff77c82886903c62a0",
+  "classes": {
+    "0": "large",
+    "1": "medium",
+    "2": "small"
+  },
+  "epochs": 100,
+  "training_summary": "/home/dawntildusk/nut_vision/runs/nuts_mixed_20260914/training_summary.json",
+  "replaced_at": "2026-09-14T20:00:11.241010+08:00",
+  "backup": "/home/dawntildusk/lbot_ws/weights/backups/20260914_200011_239395",
+  "previous_sha256": "8d48f0ede58259ee2109993fdee62b06f670a9f949f5db93da56b9ef22c9206e",
+  "note": "当前选定模型：nuts_mixed_20260914/best.pt；24张同场景留出验证，非独立场景测试。",
+  "validation": {
+    "model": "/home/dawntildusk/nut_vision/runs/nuts_mixed_20260914/weights/best.pt",
+    "confidence": 0.5,
+    "iou": 0.5,
+    "images": 24,
+    "exact_frames": 23,
+    "tp": 32,
+    "fp": 1,
+    "fn": 0,
+    "precision": 0.9696969696969697,
+    "recall": 1.0,
+    "outside_scope_predictions": 0
+  }
 }
