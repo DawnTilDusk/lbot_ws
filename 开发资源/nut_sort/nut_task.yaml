@@ -171,7 +171,7 @@ detector:
   model: weights/nut_best.pt
   # 推理子进程解释器（与 ROS 系统 Python 隔离）：本机用工作区内独立 venv，
   # 不含 ROS 扩展；子进程环境已剔除 PYTHONPATH/PYTHONHOME。
-  python: /home/lionheart/Project/1_Competition/THUEI/Build_ws/lbot_ws/.venv-yolo/bin/python
+  python: /home/ran/lbot_ws/.venv-yolo/bin/python
   confidence: 0.5
   imgsz: 640
   device: cpu
@@ -205,4 +205,4 @@ detector:
   # 同型号多目标（如画面里两颗中螺母/两颗小螺母）：
   #   random=随机抓一颗继续（当前选用）；first=取检测结果第一颗；abort=中止（缺省安全行为）
   duplicate_policy: random
-  external: '/home/lionheart/Project/1_Competition/THUEI/Build_ws/lbot_ws/开发资源/nut_sort/nut_vision_detector.py:NutVisionDetector'
+  external: '/home/ran/lbot_ws/开发资源/nut_sort/nut_vision_detector.py:NutVisionDetector'
