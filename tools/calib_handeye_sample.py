@@ -21,6 +21,7 @@ import json
 import math
 import os
 import sys
+import threading
 import time
 from collections import deque
 from datetime import datetime, timezone
@@ -59,6 +60,7 @@ class CalibSampler(Node):
         self.cam_recv = None
         self.pose_recv = None
         self.pose_history = deque()   # (t, pos(3,), quat(4,))
+        self.hist_lock = threading.Lock()  # 后台 spin 线程写、GUI 线程读
 
         ns = '/' + args.namespace.strip('/')
         pose_topic = f'{ns}/{args.arm}_arm/pose_states'
@@ -89,10 +91,12 @@ class CalibSampler(Node):
         self.pose_frame = msg.header.frame_id
         self.latest_pose = (np.array([p.x, p.y, p.z]),
                             np.array([q.x, q.y, q.z, q.w]))
-        self.pose_history.append((self.pose_recv, self.latest_pose[0], self.latest_pose[1]))
-        cutoff = self.pose_recv - self.args.still_window
-        while self.pose_history and self.pose_history[0][0] < cutoff:
-            self.pose_history.popleft()
+        # 后台线程持续 spin，回调以真实 50Hz 执行，不受 GUI/检测耗时影响
+        with self.hist_lock:
+            self.pose_history.append((self.pose_recv, self.latest_pose[0], self.latest_pose[1]))
+            cutoff = self.pose_recv - self.args.still_window
+            while self.pose_history and self.pose_history[0][0] < cutoff:
+                self.pose_history.popleft()
 
     # ---- 检测 ----
     def detect_board(self):
@@ -151,16 +155,18 @@ class CalibSampler(Node):
         age = now - self.pose_recv
         if age > self.args.max_age:
             errors.append(f'机械臂位姿过期（{age:.2f}s）')
-        if len(self.pose_history) < 5:
+        with self.hist_lock:
+            history = list(self.pose_history)
+        if len(history) < 5:
             errors.append('机械臂位姿样本不足，等待稳定')
             return False, errors, None, None
-        span = self.pose_history[-1][0] - self.pose_history[0][0]
+        span = history[-1][0] - history[0][0]
         if span < self.args.still_window * 0.8:
             errors.append(f'位姿观测时长不足（{span:.2f}s）')
             return False, errors, None, None
 
-        poss = np.array([p for _, p, _ in self.pose_history])
-        quats = np.array([q for _, _, q in self.pose_history])
+        poss = np.array([p for _, p, _ in history])
+        quats = np.array([q for _, _, q in history])
         pos_mean = poss.mean(axis=0)
         pos_dev = np.linalg.norm(poss - pos_mean, axis=1).max()
         # 平均四元数（带符号对齐）后求最大偏差角
@@ -186,10 +192,12 @@ def arm_status_ascii(node, ok, pos_dev, rot_dev):
     parts = []
     if age > a.max_age:
         parts.append(f'POSE STALE {age:.1f}s')
-    if len(node.pose_history) < 5:
+    with node.hist_lock:
+        history = list(node.pose_history)
+    if len(history) < 5:
         parts.append('ARM SETTLING...')
         return ' / '.join(parts)
-    span = node.pose_history[-1][0] - node.pose_history[0][0]
+    span = history[-1][0] - history[0][0]
     if span < a.still_window * 0.8:
         parts.append('ARM SETTLING...')
     if pos_dev is not None and pos_dev > a.still_pos:
@@ -244,6 +252,11 @@ def main():
     import cv2
     cv2.namedWindow('handeye_calib', cv2.WINDOW_NORMAL)
 
+    # 后台线程持续 spin：保证 pose_states 以真实 50Hz 进回调，
+    # 否则单线程下 ArUco 检测 + waitKey 会把位姿回调饿死（静止窗口样本不足）。
+    spin_thread = threading.Thread(target=lambda: rclpy.spin(node), daemon=True)
+    spin_thread.start()
+
     count = 0
     meta_written = False
     start = time.monotonic()
@@ -251,7 +264,6 @@ def main():
     try:
         print('\n窗口聚焦后：空格/回车=记录样本， q=结束。建议 15~25 个姿态、多角度、板铺满视野。\n')
         while rclpy.ok():
-            rclpy.spin_once(node, timeout_sec=0.02)
             ok_board, rvec, tvec, n_corners, debug, board_errors, bcode = node.detect_board()
             if debug is None:
                 debug = np.zeros((480, 640, 3), dtype=np.uint8)
@@ -351,6 +363,7 @@ def main():
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()
+        spin_thread.join(timeout=1.0)
 
     print(f'\n采样结束：{count} 个样本，目录 {session_dir}')
     if count >= 5:

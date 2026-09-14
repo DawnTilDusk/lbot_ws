@@ -88,7 +88,7 @@ class ReplayTests(unittest.TestCase):
         p=self.make_plan(es, check_other=False)
         self.assertEqual(p['target'],'point_002')
 
-    def run_mock(self, offset=0., success=True, approach=False, other_offset=0., update=True, manual=False, ignore=False):
+    def run_mock(self, offset=0., success=True, approach=False, other_offset=0., update=True, manual=False, ignore=False, settle_short=0., settle_mode='creep'):
         p=self.make_plan(start='start')
         if manual:
             p['manual']=True
@@ -99,15 +99,27 @@ class ReplayTests(unittest.TestCase):
         feedback['states']['right_arm/joint_states']['message']['position']=[offset]*7
         feedback['states']['left_arm/joint_states']['message']['position']=[other_offset]*7
         calls=[]
+        last_req=[]
         class Client:
             def wait_for_service(self, **kw):return True
             def call_async(self, req):
                 calls.append(req)
+                last_req.append(req)
                 if update:
-                    feedback['states']['right_arm/joint_states']['message']['position']=req.joints
+                    settled=list(req.joints)
+                    # Service returns success while the arm stops a hair outside tolerance;
+                    # the subsequent spin (arrival-wait phase) then creeps onto target.
+                    if settle_short and (len(calls) == 1 or calls[-1].joints != calls[-2].joints):
+                        settled[1] += settle_short
+                    feedback['states']['right_arm/joint_states']['message']['position']=settled
                 return NS(done=lambda:True, result=lambda:NS(success=success))
+        def fake_spin(*a, **k):
+            # 'creep' mode: the arm keeps settling after the service returned;
+            # 'retry' mode feedback stays short until the same target is re-commanded.
+            if settle_short and settle_mode == 'creep' and last_req:
+                feedback['states']['right_arm/joint_states']['message']['position']=list(last_req[-1].joints)
         node=NS(cache={}, create_client=lambda *a:Client(), destroy_node=lambda:None)
-        modules={'rclpy':NS(init=lambda:None,ok=lambda:True,shutdown=lambda:None,spin_once=lambda *a,**k:None),
+        modules={'rclpy':NS(init=lambda:None,ok=lambda:True,shutdown=lambda:None,spin_once=fake_spin),
                  'lbot_arm_interfaces':NS(), 'lbot_arm_interfaces.srv':NS(MoveJ=NS(Request=lambda:NS())),
                  'record_workpoints':NS(Recorder=lambda ns:node,snapshot=lambda *a:feedback)}
         args=NS(move_to_start=approach, approach_speed=.15, approach_accel=.15, start_tolerance=.05,max_step=.2,speed=.15,accel=.15,timeout=1.,reached_tolerance=.03,ignore_other_arm=ignore,max_age=.5,max_skew=.15)
@@ -156,6 +168,23 @@ class ReplayTests(unittest.TestCase):
         calls,error=self.run_mock(offset=1.,approach=True,update=False)
         self.assertEqual(len(calls),1)
         self.assertIn('未到目标',error)
+
+    def test_short_settle_creeping_after_return_is_accepted(self):
+        calls,error=self.run_mock(settle_short=.033)
+        self.assertIsNone(error)
+        self.assertEqual(len(calls),3)
+
+    def test_short_settle_retries_same_target(self):
+        calls,error=self.run_mock(offset=1.,approach=True,settle_short=.033,settle_mode='retry')
+        self.assertIsNone(error)
+        self.assertEqual(calls[0].joints,calls[1].joints)  # same target re-commanded
+        # Every new target settles short once and is re-commanded before proceeding.
+        self.assertEqual([c.joints[0] for c in calls],[0.,0.,.01,.01,.02,.02,.025,.025])
+
+    def test_large_miss_does_not_retry(self):
+        calls,error=self.run_mock(offset=1.,approach=True,settle_short=.5,settle_mode='retry')
+        self.assertEqual(len(calls),1)
+        self.assertIn('未到目标容差',error)
 
     def test_service_failure_stops_following_requests(self):
         calls,error=self.run_mock(success=False)

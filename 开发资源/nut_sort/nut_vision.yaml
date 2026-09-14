@@ -1,0 +1,127 @@
+# ============================================================
+# 螺母视觉识别参数（tools/nut_vision.py 与 nut_vision_detector.py 共用）
+#
+# 现场调参顺序：
+#   1. 开相机 depth_registration:=true，跑 python3 tools/nut_vision.py
+#   2. 绿/黄框没套住打印黑框：固定机位优先写死 frame.manual_roi=[x,y,w,h]
+#      （在画面上按像素量；本文件已按 2026-09-10 机位标定）
+#   3. 螺母没圈上：阈值默认 auto（纸面灰度中位-color_auto_margin，clamp
+#      85~150），先确认螺母与框线/彼此留 ≥10mm；光照特殊才切 fixed 调
+#      segment.color_dark_value（螺母漏检调大，框线被当螺母调小）
+#   4. 叠加层 flats=xx.xmm 应对边距（卡尺值，本场 40/50/70），阈值见 classify
+#   5. s 键存快照到 开发资源/nut_sort/snapshots/，可用 --offline 回放复盘
+# 未列出的键用代码内默认值（nut_vision.py DEFAULT_PARAMS）。
+#
+# 真机要点（2026-09-10 实测）：
+#   * 螺母是黑色的：顶面红外深度未必整片丢失（本场有效率 ~80%），但高度
+#     偏置严重、相触组近侧壁还会读出一圈碎片假高度——以彩图暗色剪影为主
+#     通道（segment.color_enable），轮廓射线投桌面平面量公制尺寸，深度
+#     碎片落在被拒暗块内会被 dark_reject_overlap 门控一起拦掉；
+#     螺母之间、螺母与黑框线之间要留 ≥10mm 间隙，否则剪影粘连会被
+#     elong/solidity/touch 门限整组拒绝（相触不抓是有意的安全策略）。
+#   * 斜俯视角下厚螺母近侧竖直面进入剪影，corners（对角距）会偏大，
+#     分类只信 flats（对边距，短边）。
+# ============================================================
+
+frame:
+  enable: true
+  # 固定机位可写死 ROI 矩形；2026-09-10 下午机位移动后改为自动检测：
+  # ring 命中粗框后，对外环轮廓做凸包+4 点近似，直接得到黑框【外缘】透视
+  # 梯形（note 带 frame_found_ring+hull，2026-09-10 新机位一次成功；
+  # 螺母与框线暗桥接也拉不歪凸包）。凸包失败才回退四边 RANSAC（+lines）。
+  # 自动不稳时再按叠加图量像素写死：manual_roi: [x, y, w, h]
+  manual_roi:
+  refine_lines: true       # 凸包失败时再用四边 RANSAC 精修（仍失败回退粗框）
+  method: edge             # edge=Canny 四边形（清晰打印框）/ ring=亮内腔环（手绘细框）
+  canny_lo: 60.0
+  canny_hi: 160.0
+  edge_dilate_px: 3
+  quad_rect_min: 0.55
+  edge_contrast: 25.0
+  ring_dark_values: [120, 135, 150, 165]
+  ring_hole_ratio: 0.15
+  ring_inner_min: 140.0
+  min_area_ratio: 0.012    # 自动框最小面积比（真机细框≈0.025）
+  aspect_min: 0.35
+  aspect_max: 2.8
+  # 凸包多边形贴的是框【外缘】，打印线粗约 3~5px：erode 6 跨到内沿。
+  # 螺母剪影再进入 segment.touch_band_px 内缘带仍按贴框线拒绝——
+  # 螺母与框线必须留 ≥10mm 间隙（相触不抓是有意的安全策略）
+  erode_px: 6
+  # 凸包精修校验：每条边沿弦采样，至少 refine_edge_support 比例的点在
+  # ±refine_edge_band_px 邻域内能找到灰度 <refine_edge_value 的暗像素
+  # （防止凸包弦从亮纸面/褶皱上切过；手绘弱边场景可低到 0.50）
+  refine_edge_support: 0.50
+  refine_edge_band_px: 5
+  refine_edge_value: 150
+  # RANSAC 兜底找框线参数（一般不动；粗框与真实斜线能差 20~40px，band 要够宽）
+  refine_band_px: 45
+  refine_inlier_px: 3.5
+  refine_dark_value: 130
+  refine_min_span: 0.50
+  refine_iters: 200
+  refine_max_drift_px: 28
+  on_missing: image        # image=找不到框用全图（打印警告）；fail=直接报错
+
+plane:
+  ransac_iters: 200
+  thresh_mm: 3.0           # 纸面内点阈值；塑封纸有翘曲，2.5~3.5
+  sample_stride: 4
+  max_points: 20000
+  min_points: 80
+
+segment:
+  # —— 深度高度法（浅色/金属螺母的主通道；黑螺母顶面无深度，走下面的彩图路径）——
+  height_min_mm: 4.0
+  height_max_mm: 30.0
+  median_ksize: 5          # 0=关，只支持 3/5
+  open_px: 2
+  close_px: 5
+  # —— 黑螺母彩色剪影路径 ——
+  color_enable: true
+  # 阈值自适应（2026-09-10 强顶光，螺母受光面灰度 180+，固定 75 只剩碎块）：
+  # auto = ROI 灰度中位（纸面）- color_auto_margin，clamp [85,150]；
+  #        本场纸面 179 → 阈值 134，三颗外轮廓完整、褶皱碎块 <35px 被滤。
+  #        螺母受光面与纸面同亮没关系：亮面留在剪影里作内洞，外轮廓仍闭合。
+  # fixed = 才用 color_dark_value（弱光/纸面发黄时手动定）。
+  color_thresh_mode: auto
+  color_auto_margin: 45
+  color_thresh_min: 85
+  color_thresh_max: 150
+  color_dark_value: 75     # fixed 模式：灰度 < 此值算螺母
+  color_open_px: 3
+  color_close_px: 3        # 核别调大，相邻螺母间隙只有几像素
+  color_elong_max: 1.6     # 斜俯视长轴偏长，比对边法(1.35)宽；相触对 elong>1.8 仍拒
+  dark_reject_overlap: 0.35 # 深度碎片落在被拒暗块内的占比门限（相触防假检出）
+  touch_band_px: 3        # 剪影进入 ROI 内缘这条带按贴框线拒；hull 本身精度
+                          # ~1px、erode 6 已越过线粗，这里只留 3px 裕量；
+                          # 螺母离框【外缘】约 (6+3)px≈10mm 即可抓
+  plane_exclude_dilate: 11 # 拟合平面时暗色块外扩排除（像素）
+  # 窄颈相触（8 字形，仅角点接触）自动拆分：逐次腐蚀找两瓣种子 + 距离
+  # 变换分水岭；拆出的两瓣各自过门限才收，带 touch_split 警告。深重叠
+  # （腐蚀 >split_max_erode_frac·等效半径才分开）不拆、整组拒
+  split_enable: true
+  split_max_erode_frac: 0.40
+  split_seed_min_frac: 0.08
+  split_piece_min_frac: 0.22
+  split_min_solidity: 0.70
+  # —— 公制门限（2026-09-10 卡尺：三颗对边距 40/50/70mm；斜俯视剪影
+  #    含近侧壁会系统性放大约 10%，40mm 实测 44.5，故上限放到 80）——
+  flats_min_mm: 25.0
+  flats_max_mm: 88.0       # 70mm 大号斜俯视+阈值在 136~145 摆动实测 78.6~83.1
+  area_min_mm2: 700.0      # 40mm 六角名义面积 ~1390mm²，留半值裕度
+  area_max_mm2: 9000.0     # 同上阈值摆动实测至 7494
+  elong_max: 1.35          # 深度高度法专用
+  solidity_min: 0.80       # 单颗凸六角≈1；相触哑铃域 <0.85
+  check_hole: false
+
+classify:
+  # 2026-09-10 卡尺：三颗六边形螺母对边距 40/50/70mm。斜俯视剪影含近
+  # 侧壁，flats 放大约 10%（40 实测 44.5；推算 50~55、70~78），阈值取
+  # 名义/放大两种情形都分得开的空档：s<=48，48<m<=65，l>65
+  mode: thresholds
+  s_max_mm: 48.0           # thresholds 模式：<= 小号（40mm）
+  m_max_mm: 65.0           # <= 中号（50mm），再大是大号（70mm）
+  gap_ratio: 0.13
+  gap_abs_mm: 1.5
+  max_kinds: 3

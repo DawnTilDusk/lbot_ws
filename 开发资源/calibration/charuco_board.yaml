@@ -1,6 +1,6 @@
 dictionary: DICT_5X5_100
 squares_x: 8
 squares_y: 6
-square_length_m: 0.0285
-marker_length_m: 0.021
+square_length_m: 0.0318
+marker_length_m: 0.0235
 note: 打印后用尺实测方格边长并回填 square_length_m；等比例打印，勿缩放。

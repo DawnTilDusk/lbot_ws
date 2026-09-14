@@ -10,7 +10,7 @@ import cv2
 import numpy as np
 import yaml
 from nut_robot import TaskConfig, DEFAULT_CONFIG, TaskError
-from nut_yolo import infer_pixels, locate, detect_once
+from nut_yolo import infer_pixels, locate, detect_once, annotate
 from camera_pick_move import load_extrinsics
 
 
@@ -55,15 +55,10 @@ def main():
                         p_base=(R@d.p_cam+t).tolist(), frame='base_link',
                         depth_method=d.extra['depth_method']) for d in detections]
     args.output.mkdir(parents=True, exist_ok=False)
-    canvas = color.copy()
+    canvas = annotate(color, records, located=detections,
+                      status='nut_yolo_preview: boxes + center-patch depth (no motion)')
     for r in records:
-        x1,y1,x2,y2 = map(round,r['bbox'])
-        u,v = round(r['u']),round(r['v'])
-        cv2.rectangle(canvas,(x1,y1),(x2,y2),(0,255,0),2)
-        cv2.drawMarker(canvas,(u,v),(0,0,255),cv2.MARKER_CROSS,16,2)
-        cv2.putText(canvas,f'{r["label"]} {r["confidence"]:.2f} ({u},{v})',
-                    (x1,max(18,y1-6)),cv2.FONT_HERSHEY_SIMPLEX,.6,(0,255,255),2)
-        print(json.dumps(r,ensure_ascii=False))
+        print(json.dumps(r, ensure_ascii=False))
     for name,img in [('color.png',color),('centers.jpg',canvas)]:
         if not cv2.imwrite(str(args.output/name),img):
             raise TaskError(f'无法保存 {name}')
