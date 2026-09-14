@@ -1,0 +1,25 @@
+{
+  "source": "/home/dawntildusk/nut_vision/runs/nuts_extra99_20260914_190429/weights/best.pt",
+  "sha256": "8d48f0ede58259ee2109993fdee62b06f670a9f949f5db93da56b9ef22c9206e",
+  "classes": {
+    "0": "large",
+    "1": "medium",
+    "2": "small"
+  },
+  "training_images": 99,
+  "additional_epochs": 100,
+  "parent_model": {
+    "source": "/home/dawntildusk/nut_vision/runs/nuts_all61_20260910_225515/weights/best.pt",
+    "sha256": "ba48f59e7d8f2f3e065d8275bf30c27547895c505dcd70060885e0ddd79fac64",
+    "classes": {
+      "0": "large",
+      "1": "medium",
+      "2": "small"
+    },
+    "training_images": 61,
+    "additional_epochs": 100,
+    "note": "当前选定模型；并非经独立测试集证明的最优模型。"
+  },
+  "backup": "/home/dawntildusk/lbot_ws/weights/backups/20260914_190719",
+  "note": "当前选定模型：在旧权重基础上用99张已复核照片追加训练100轮；指标为训练集自检，未独立验证。"
+}

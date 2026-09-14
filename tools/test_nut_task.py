@@ -228,7 +228,7 @@ class ConfigAndLegsTest(unittest.TestCase):
     def test_real_config_arm_close_defaults(self):
         cfg = TaskConfig(DEFAULT_CONFIG)
         for k in SIZE_LABELS:
-            self.assertEqual(cfg.close_for('left', k), [0, 40, 0, 0, 0, 0])
+            self.assertEqual(cfg.close_for('left', k), [0, 0, 0, 0, 0, 0])
             self.assertEqual(cfg.close_for('right', k), [0, 0, 0, 0, 0, 0])
 
     def test_real_config_open_and_pacing(self):

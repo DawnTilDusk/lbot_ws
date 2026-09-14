@@ -142,7 +142,7 @@ hand:
   # 各臂闭合默认值（2026-09-10 现场给定，三颗螺母先共用；当晚小拇指也改为闭合 0，原 255 为张开）
   close:
     left:  [0, 0, 0, 0, 0, 0]
-    right: [0, 0, 0, 0, 0, 0]  # 右臂六路全闭（现场调定值；左拇指弯曲保留 40）
+    right: [0, 0, 0, 0, 0, 0]  # 双臂六路全闭（2026-09-11 现场调定值）
   # 若某尺寸要单独手型，按尺寸覆盖（优先级高于 close），三种写法：
   # sizes:
   #   l: {joint: [180, 180, 180, 180, 180, 180]}          # 双臂共用
@@ -169,7 +169,7 @@ detector:
   type: manual
   # 主流程 --detector yolo 启用；模型路径相对工作区。
   model: weights/nut_best.pt
-  # 推理子进程解释器（与 ROS 系统 Python 隔离）：本机用工作区内独立 venv，
+# 推理子进程解释器（与 ROS 系统 Python 隔离）：本机用工作区内独立 venv，
   # 不含 ROS 扩展；子进程环境已剔除 PYTHONPATH/PYTHONHOME。
   python: /home/ran/lbot_ws/.venv-yolo/bin/python
   confidence: 0.5

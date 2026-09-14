@@ -40,14 +40,24 @@ ros2 launch orbbec_camera gemini2.launch.py \
 ```zsh
 source /opt/ros/jazzy/setup.zsh
 /usr/bin/python3 tools/nut_yolo_live.py --device 0
+
+# 四类别模型（大、中、小、白色）
+/usr/bin/python3 tools/nut_yolo_live.py --device 0 \
+  --model weights/nut_white_best.pt
 ```
 
-窗口左侧显示大/中/小检测框和中心十字，右侧显示置信度、像素中心、相机 XYZ 和
+窗口左侧显示大/中/小检测框（四类模型还显示白色）和中心十字，右侧显示置信度、像素中心、相机 XYZ 和
 机器人 `base_link` XYZ（米）。模型常驻后台，仅处理最新配对帧。
 `--device cpu` 使用 CPU，`--scale 0.6` 缩小窗口，`--conf 0.6` 调整检测阈值。
+实时预览默认 `--device auto`，在 Conda 推理进程内自动选择 CUDA GPU，无法使用 CUDA
+时选择 CPU；指定 `--device 0` 可强制使用 GPU。首次加载需要预热。
+单次推理超过 `--inference-timeout 60` 秒或子进程出错时，窗口保留并自动重启推理进程。
+相机订阅仅保留最新消息，帧以未压缩数组传给推理进程，减少排队和编码延迟。
 按 `s` 保存画面和 JSON；按 `q`、ESC 或关闭窗口退出。正常退出保存最后一次快照。
 输出目录为 `recordings/yolo_live/<时间戳>/`。深度无效时显示错误，断流或帧过期时隐藏旧坐标。
 这个入口没有机械臂运动客户端。
+`--model` 仅覆盖本次预览的模型，不修改默认抓取配置。白色目标的 JSON 标签为
+`white`，与其他目标使用相同的深度坐标解算；机械臂业务仍使用原有 l/m/s 抓取流程。
 
 ### 单次检测与离线复现
 
