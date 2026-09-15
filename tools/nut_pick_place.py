@@ -564,9 +564,43 @@ def run_one_nut(cfg, runner, left, right, label, det, eul_left, R_BTC, t_BTC,
     print(f'  检测点(螺母) {np.round(pb_raw * 1000, 1)}mm -> 腕部目标'
           f'{np.round(pb * 1000, 1)}mm（偏移 '
           f'{np.round(cfg.grasp_offset_for(label) * 1000, 1)}mm）')
-    print(f'  [左] MoveJP 到螺母正上方 {np.round(hover * 1000, 1)}mm...')
-    runner._goto_pose(left, hover, eul_left, f'{SIZE_NAMES_CN[label]}螺母 hover 悬停')
+    # 安全路径（对任意螺母位置/起始姿态都安全）：
+    #   1. MoveL 竖直上升到固定安全高度 transit_z（始终高于桌面 ~300mm）
+    #   2. MoveJP 水平移到 hover 正上方（z=transit_z，高度够不会扫桌）
+    #   3. MoveL 竖直下降到 hover
+    #   4. MoveL 竖直下探到 down
+    #   5. MoveL 竖直抬起到 lift
+    TABLE_Z = -0.44  # 桌面在 base_link 系的估计 z，实际值由深度+标定决定
+    TRANSIT_Z = TABLE_Z + 0.25  # 中转平面：桌面 +250mm，留足余量
+    if left.pose is None:
+        left.wait_state()
+    current_pos = left.pose[0]
+    cur_z = current_pos[2]
+    # 步骤1：先升到中转平面（如果当前更低的话）
+    if cur_z < TRANSIT_Z + 0.01:  # 当前低于中转平面 10mm 以上
+        rise_xyz = np.array([current_pos[0], current_pos[1], TRANSIT_Z])
+        print(f'  [左] MoveL 竖直上升到中转平面 {np.round(rise_xyz * 1000, 1)}mm...')
+        runner._goto_pose(left, rise_xyz, eul_left,
+                          f'{SIZE_NAMES_CN[label]}螺母 上升到中转平面', linear=True)
+        dwell(0.15, '上升到位')
+    # 步骤2：MoveJP 水平横移到 hover 正上方（z 保持 TRANSIT_Z）
+    transit_xyz = np.array([hover[0], hover[1], TRANSIT_Z])
+    print(f'  [左] MoveJP 水平横移到 {np.round(transit_xyz * 1000, 1)}mm（中转平面横移）...')
+    runner._goto_pose(left, transit_xyz, eul_left, f'{SIZE_NAMES_CN[label]}螺母 中转平面横移')
+    dwell(0.15, '横移到位')
+    # 步骤3：MoveL 下降到 hover
+    print(f'  [左] MoveL 到螺母正上方 hover {np.round(hover * 1000, 1)}mm（竖直下降）...')
+    runner._goto_pose(left, hover, eul_left, f'{SIZE_NAMES_CN[label]}螺母 hover 悬停',
+                      linear=True)
     dwell(cfg.hover_dwell_seconds, '悬停确认，准备下探')
+    if getattr(cfg, 'stop_at_hover', False):
+        d = hover - pb_raw
+        print(f'  [--stop-at-hover] 左臂停在 {SIZE_NAMES_CN[label]}螺母 hover，不下探不闭合。')
+        print(f'    检测点(螺母) {np.round(pb_raw * 1000, 1)}mm -> hover '
+              f'{np.round(hover * 1000, 1)}mm，偏离检测点 {np.round(d * 1000, 1)}mm')
+        print('    请现场核对指尖与螺母的实际偏差后按 Ctrl-C 退出（臂保持不动）。')
+        return 'hover_stop'
+    # 步骤4：MoveL 下探到 down
     print(f'  [左] MoveL 竖直下探 {np.round(down * 1000, 1)}mm...')
     runner._goto_pose(left, down, eul_left, f'{SIZE_NAMES_CN[label]}螺母 down 下探',
                       linear=True)
@@ -575,6 +609,7 @@ def run_one_nut(cfg, runner, left, right, label, det, eul_left, R_BTC, t_BTC,
     print(f'  [左] 闭合手 {close_vals}，静置 {cfg.settle_seconds:.1f}s')
     left.hand_close(close_vals, settle=cfg.settle_seconds)
     dwell(cfg.pre_hand_seconds, '抓稳后抬起')
+    # 步骤5：MoveL 竖直抬起到 lift
     print(f'  [左] MoveL 从抓取点竖直上抬 {lift_mm:.0f}mm '
           f'到 {np.round(lift * 1000, 1)}mm（先脱离桌面再做其他动作）...')
     runner._goto_pose(left, lift, eul_left, f'{SIZE_NAMES_CN[label]}螺母抓后竖直上抬',
@@ -809,8 +844,10 @@ def execute(cfg, store, R_BTC, t_BTC, K, left_legs, apprs, places, release_leg,
                     handle_ik_failure(cfg, left, seed_leg, seed_names, fail)
                 else:
                     print(f'  {SIZE_NAMES_CN[label]}螺母新鲜视觉点 IK 复检通过。')
-            run_one_nut(cfg, runner, left, right, label, det, grasp_poses[label][0],
-                        R_BTC, t_BTC, left_legs, apprs, places)
+            if run_one_nut(cfg, runner, left, right, label, det, grasp_poses[label][0],
+                           R_BTC, t_BTC, left_legs, apprs, places) == 'hover_stop':
+                print('已按 --stop-at-hover 停在 hover，退出（左臂保持当前姿态）。')
+                return
             if idx < len(remaining) - 1:
                 print(f'  螺母之间停顿 {cfg.between_leg_seconds:.1f}s，'
                       f'下一颗 {SIZE_NAMES_CN[remaining[idx + 1]]}...')
@@ -844,6 +881,9 @@ def main():
     p.add_argument('--allow-ik-fail', action='store_true',
                    help='裸 IK 预检全失败也继续：真实 MoveJP/MoveL 仍由驱动把关，'
                         '不可达会在该步安全中止。仅在对照探针证明是预检误判时使用')
+    p.add_argument('--stop-at-hover', action='store_true',
+                   help='真机只走到第一颗螺母正上方 hover 悬停位就停下（不下探/不闭合/不回放段），'
+                        '用于现场核对视觉识别点到准备抓取位之间的偏差')
     p.add_argument('--show', action='store_true',
                    help='YOLO 识别时弹窗实时显示画面/检测框（即使 yaml detector.show_window=false）')
     args = p.parse_args()
@@ -853,6 +893,7 @@ def main():
             args.config, arm_override=args.arm, order_override=args.order,
             detector_override=args.detector, speed_scale=args.speed)
         cfg.allow_ik_fail = bool(args.allow_ik_fail)
+        cfg.stop_at_hover = bool(args.stop_at_hover)
         if args.show:
             cfg.detector_raw['show_window'] = True
         if args.speed != 1.0:
