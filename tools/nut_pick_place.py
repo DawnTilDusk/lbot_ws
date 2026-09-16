@@ -20,9 +20,11 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from nut_robot import (DEFAULT_CONFIG, SIZE_LABELS, SIZE_NAMES_CN, PoseStore,
+from nut_robot import (DEFAULT_CONFIG, ORDER_LABELS, SIZE_LABELS, SIZE_NAMES_CN, PoseStore,
                        TaskConfig, TaskError, pose_euler_rad, resolve_ws)
 from nut_sequences import load_leg
+from nut_needle import (detect_needle, place_at_needle, needle_options, release_euler,
+                        release_target)
 
 HANDOFF_WARN_M = 0.020   # 左释放点 vs 右抓取点距离超过此值 dry-run 警告
 
@@ -70,8 +72,10 @@ def parse_order(text):
     if len(chars) == 1 and len(chars[0]) == 3:
         chars = list(chars[0])
     out = [c.lower() for c in chars]
-    if any(c not in SIZE_LABELS for c in out):
-        raise argparse.ArgumentTypeError(f'顺序只允许 l/m/s，收到 {text!r}')
+    if any(c not in ORDER_LABELS for c in out):
+        raise argparse.ArgumentTypeError(
+            f'顺序只允许 {"".join(ORDER_LABELS)}'
+            f'（white=白螺母，与大黑螺母同形状，复用 l 档参数），收到 {text!r}')
     return out
 
 
@@ -90,8 +94,9 @@ def load_all_legs(cfg):
         return cache[key]
 
     left_legs = [get('left', s) for s in cfg.left_legs]
-    apprs = {k: get('right', cfg.right_approaches[k]) for k in SIZE_LABELS}
-    places = {k: get('right', cfg.right_place[k]) for k in SIZE_LABELS}
+    # 按全部可识别标签建表（white 与 l 指向同一条段），下游 apprs[label] 不必特判
+    apprs = {k: get('right', cfg.right_approaches[k]) for k in ORDER_LABELS}
+    places = {k: get('right', cfg.right_place[k]) for k in ORDER_LABELS}
     ready_left = get('left', cfg.left_ready) if cfg.left_ready else None
     ready_right = get('right', cfg.right_ready) if cfg.right_ready else None
 
@@ -321,11 +326,12 @@ def print_plan(cfg, store, left_legs, apprs, places, release_leg, detections, R_
                                       len(shared.joints) - 1: '<- 盒位释放点 OPEN（l/m/s 共用）'}})
     else:
         place_markers = {}
-        for k, leg in places.items():
+        for k in SIZE_LABELS:
+            leg = places[k]
             place_markers[id(leg)] = {0: '<- 中央重抓点',
                                       len(leg.joints) - 1: f'<- {k}格释放点'}
         print_leg_table('【右臂固定段】place（按尺寸三选一）：',
-                        list(places.values()), place_markers)
+                        [places[k] for k in SIZE_LABELS], place_markers)
     print('  【交接点核对】')
     for row in handoff_check(release_leg, apprs, cfg.approach_shared):
         print(row)
@@ -455,7 +461,9 @@ def resolve_grasp_eulers(cfg, store):
     """
     leg_cache = {}
     out = {}
-    for k in SIZE_LABELS:
+    # order 里可能含同形状别名（white），一并解出姿态
+    wanted = tuple(SIZE_LABELS) + tuple(k for k in cfg.order if k not in SIZE_LABELS)
+    for k in wanted:
         try:
             out[k] = resolve_grasp_euler(cfg, store, k, leg_cache)
         except TaskError as exc:
@@ -552,6 +560,48 @@ def resume_ready_for_detect(cfg, runner, left, right, left_legs, apprs,
     time.sleep(cfg.ready_hold_seconds)
 
 
+def plan_via_ik(robot, targets, euler, ik_seeds, seed_names, max_joint_diff_deg,
+                start_joints=None):
+    """把已切好的笛卡尔路点逐段逆解、并核对换臂型幅度（**只算不动**）。
+
+    返回 (plan, err)：
+      plan = [(joints, diff_deg, seed_txt), ...]；
+      err  = None 成功；否则 (第几段, 总段数, 该段目标点, diff_deg 或 None)，
+             diff_deg=None 表示该段多种子逆解全部失败。
+
+    段与段之间用上一段的解当额外种子，保证臂型连续、不跳分支。单关节变化按
+    2π 归一化后再比 —— 数值 IK 会把同一个物理角度给成 +234° / -126°，不归一化
+    会把 360° 环绕误判成"需要换臂型"。
+
+    与 move_via_ik 的执行阶段是同一套算法：move_via_ik 用它拿到 plan 再执行，
+    resolve_transit_z 用它把候选路径整条预演一遍，不合格就换个高度。
+    """
+    plan = []
+    prev = None
+    for idx, tgt in enumerate(targets, 1):
+        if prev is None:
+            extra, names = list(ik_seeds), list(seed_names)
+        else:
+            extra = [prev] + list(ik_seeds)
+            names = ['当前关节角', '上一段解'] + list(seed_names[1:])
+        joints, used = robot.ik_solve(tgt, euler, extra_seeds=extra)
+        if joints is None:
+            return None, (idx, len(targets), tgt, None)
+        ref = prev if prev is not None else (
+            start_joints if start_joints is not None else robot.joints)
+        if ref is None:
+            raise TaskError('无当前关节反馈，无法核对换臂型幅度')
+        q, r = np.asarray(joints, float), np.asarray(ref, float)
+        raw = np.abs(q - r)
+        diff = float(np.degrees(np.minimum(raw, 2 * np.pi - raw).max()))
+        if diff > max_joint_diff_deg:
+            return None, (idx, len(targets), tgt, diff)
+        seed_txt = names[used] if (used is not None and used < len(names)) else '?'
+        plan.append((joints, diff, seed_txt))
+        prev = joints
+    return plan, None
+
+
 def move_via_ik(runner, robot, position, euler, ik_seeds, seed_names, where,
                 max_joint_diff_deg=60.0, steps=1):
     """用「我们算 IK + MoveJ 执行」走完一段笛卡尔运动，完全绕开 SDK 内部 IK。
@@ -578,33 +628,19 @@ def move_via_ik(runner, robot, position, euler, ik_seeds, seed_names, where,
         targets = [position]
 
     # ---- 阶段1：把所有段的关节解全部算出来并核对；此阶段一行都不动 ----
-    plan = []
-    prev = None
-    for idx, tgt in enumerate(targets, 1):
-        if prev is None:
-            extra, names = list(ik_seeds), list(seed_names)
-        else:
-            extra = [prev] + list(ik_seeds)
-            names = ['当前关节角', '上一段解'] + list(seed_names[1:])
-        joints, used = robot.ik_solve(tgt, euler, extra_seeds=extra)
-        if joints is None:
+    plan, err = plan_via_ik(robot, targets, euler, ik_seeds, seed_names,
+                            max_joint_diff_deg)
+    if err is not None:
+        idx, n, tgt, diff = err
+        if diff is None:
             raise TaskError(
-                f'{where}：第 {idx}/{len(targets)} 段 '
+                f'{where}：第 {idx}/{n} 段 '
                 f'{np.round(np.asarray(tgt) * 1000, 1)}mm 多种子逆解全部失败，'
                 f'已中止（臂未移动）。')
-        ref = prev if prev is not None else robot.joints
-        if ref is None:
-            raise TaskError(f'{where}：无当前关节反馈，无法核对换臂型幅度')
-        diff = float(np.degrees(np.abs(np.asarray(joints, float)
-                                       - np.asarray(ref, float))).max())
-        if diff > max_joint_diff_deg:
-            raise TaskError(
-                f'{where}：第 {idx}/{len(targets)} 段需要换臂型（最大单关节变化 '
-                f'{diff:.1f}° > {max_joint_diff_deg:.0f}°），拒绝抡臂，'
-                f'已中止（臂未移动）。')
-        seed_txt = names[used] if (used is not None and used < len(names)) else '?'
-        plan.append((joints, diff, seed_txt))
-        prev = joints
+        raise TaskError(
+            f'{where}：第 {idx}/{n} 段需要换臂型（最大单关节变化 '
+            f'{diff:.1f}° > {max_joint_diff_deg:.0f}°），拒绝抡臂，'
+            f'已中止（臂未移动）。')
 
     # ---- 阶段2：全部段都有解，才开始执行 ----
     if len(plan) > 1:
@@ -618,43 +654,93 @@ def move_via_ik(runner, robot, position, euler, ik_seeds, seed_names, where,
                          runner.cfg.move_timeout)
 
 
+TRANSIT_MAX_JOINT_DIFF_DEG = 60.0   # 与 move_via_ik 的默认保护阈值一致
+
+
+def transit_path_ok(robot, start_xyz, hover, z, eul, ik_seeds, seed_names,
+                    max_joint_diff_deg):
+    """预演「竖直上升到中转平面 + 分段横移到 hover 正上方」整条路径。
+
+    返回 (是否全程臂型连续, 说明)。只调 IK 服务，不动臂。
+
+    为什么必须预演整条路径：端点解得出、甚至离当前臂型很近，都不代表中途不穿
+    奇异位形。实测同一颗螺母：z=-190mm 横移最大单关节变化 156.8°（挂第 9/10 段），
+    z=-215mm 只有 6.7°。差别只在高度，端点检查完全看不出来。
+    """
+    if start_xyz is None:
+        return False, '没有末端位姿反馈，无法预演'
+    rise = np.array([start_xyz[0], start_xyz[1], float(z)])
+    plan_r, err_r = plan_via_ik(robot, [rise], eul, ik_seeds, seed_names,
+                                max_joint_diff_deg)
+    if err_r is not None:
+        return False, ('上升段逆解失败' if err_r[3] is None
+                       else f'上升段就换臂型 {err_r[3]:.1f}°')
+    goal = np.array([hover[0], hover[1], float(z)])
+    dist = float(np.linalg.norm(goal - rise))
+    steps = max(2, int(round(dist / 0.025)))
+    targets = [rise + (goal - rise) * (i / steps) for i in range(1, steps + 1)]
+    plan_s, err_s = plan_via_ik(robot, targets, eul, ik_seeds, seed_names,
+                                max_joint_diff_deg, start_joints=plan_r[-1][0])
+    if err_s is not None:
+        idx, n, _tgt, d = err_s
+        return False, (f'横移第 {idx}/{n} 段逆解失败' if d is None
+                       else f'横移第 {idx}/{n} 段换臂型 {d:.1f}°')
+    return True, (f'上升最大差 {max(p[1] for p in plan_r):.1f}°，'
+                  f'横移 {dist * 1000:.0f}mm/{steps} 段最大差 '
+                  f'{max(p[1] for p in plan_s):.1f}°')
+
+
 def resolve_transit_z(robot, hover, eul_left, ik_seeds, seed_names, ideal_z, label,
-                      step=0.025, min_clear=0.05):
-    """中转平面高度自适应：从理想高度逐级下降，取第一个 IK 可解的高度。
+                      step=0.025, min_clear=0.05,
+                      max_joint_diff_deg=TRANSIT_MAX_JOINT_DIFF_DEG):
+    """中转平面高度自适应：从理想高度逐级下降，取第一个「解得出**且不用换臂型**」的高度。
 
     理想高度是桌面 +250mm（横移时离桌面最远、最安全），但机械臂在
-    「离机身近 + 抬得高」这个角落会收折超限，固定高度可能不可达
-    （实测中螺母在 -190mm 被驱动拒绝）。下限是该螺母 hover 点上方
+    「离机身近 + 抬得高」这个角落会收折超限。下限是该螺母 hover 点上方
     min_clear，保证横移时不会蹭到螺母（hover 本身已在螺母上方 hover_height）。
 
-    全程不可解时抛 TaskError —— 在运动前中止，绝不盲动。
+    判定标准是**整条「上升 + 分段横移」路径全程臂型连续**（transit_path_ok 预演），
+    不是只看端点能不能解。这是 2026-09-16 两次实测踩出来的：
+      * 旧版 A：只问"能不能解出逆解" —— 某个点常常**只有另一个臂型分支**才解得开，
+        数值 IK 会给你那个远在 130~197° 外的解，于是放行了 -190mm，横移挂掉。
+      * 旧版 B：改成"解出来的臂型离当前不超过阈值" —— 端点近了，但直臂横移 25cm
+        会在**中途**穿过奇异位形，第 9/10 段照样跳 150°。
+    实测同一颗螺母：z=-190mm 横移最大单关节变化 156.8°，z=-215mm 只有 6.7°。
+    差别只在高度，只有把整条路径预演一遍才看得出来。
+
+    全程找不到连续路径时抛 TaskError —— 在运动前中止，绝不盲动。
     返回 (裁剪后的 z, 说明文字)。
     """
     floor_z = hover[2] + min_clear
     z = float(ideal_z)
     tried = 0
+    start_xyz = (np.asarray(robot.pose[0], float)
+                 if getattr(robot, 'pose', None) is not None else None)
+    last_reason = '未知'
     while z >= floor_z - 1e-9:
-        ok, used = robot.ik_check(np.array([hover[0], hover[1], z]),
-                                  eul_left, extra_seeds=ik_seeds)
         tried += 1
+        ok, why = transit_path_ok(robot, start_xyz, hover, z, eul_left,
+                                  ik_seeds, seed_names, max_joint_diff_deg)
         if ok:
             if tried == 1:
-                return z, f'理想高度可达（种子：{seed_names[used]}）'
-            return z, (f'理想高度 {np.round(ideal_z * 1000, 1)}mm 不可达，'
-                       f'降 {tried - 1} 档到 {np.round(z * 1000, 1)}mm'
-                       f'（种子：{seed_names[used]}）')
+                return z, f'理想高度整条路径连续（{why}）'
+            return z, (f'理想高度 {np.round(ideal_z * 1000, 1)}mm 走不通，'
+                       f'降 {tried - 1} 档到 {np.round(z * 1000, 1)}mm（{why}）')
+        last_reason = f'{np.round(z * 1000, 1)}mm 处 {why}'
         z -= step
     raise TaskError(
         f'左臂对{SIZE_NAMES_CN[label]}螺母：中转平面自 '
-        f'{np.round(ideal_z * 1000, 1)}mm 逐级下降 {tried} 档（下限 '
-        f'{np.round(floor_z * 1000, 1)}mm = 该螺母 hover 上方 {min_clear * 1000:.0f}mm）'
-        f'逆解全部失败，无法安全横移，已在运动前中止。'
-        f'请检查该螺母的视觉位置/深度/外参，或 '
-        f'left.grasp_orientation_by_size.{label} 姿态。')
+        f'{np.round(ideal_z * 1000, 1)}mm 逐级下降 {tried} 档到下限 '
+        f'{np.round(floor_z * 1000, 1)}mm（= 该螺母 hover 上方 {min_clear * 1000:.0f}mm）'
+        f'仍找不到一条「上升+横移」全程臂型连续的路（最后：{last_reason}），'
+        f'已在运动前中止。请检查该螺母的视觉位置/深度/外参，或 '
+        f'left.grasp_orientation_by_size.{label} 姿态；'
+        f'也可以在 motion.transit_z 里直接写死一个中转平面高度。')
 
 
 def run_one_nut(cfg, runner, left, right, label, det, eul_left, R_BTC, t_BTC,
-                left_legs, apprs, places):
+                left_legs, apprs, places, ik_seeds=None, seed_names=None,
+                needle_target=None):
     pb_raw, pb, hover, down, lift = grasp_points(cfg, det, R_BTC, t_BTC)
     lift_mm = cfg.lift_height_for(label) * 1000
 
@@ -676,8 +762,10 @@ def run_one_nut(cfg, runner, left, right, label, det, eul_left, R_BTC, t_BTC,
     if left.pose is None:
         left.wait_state()
     _, ik_seeds, seed_names = ik_seed_bank(left_legs)
+    ideal_tz = getattr(cfg, 'transit_z', None)
     transit_z, transit_note = resolve_transit_z(
-        left, hover, eul_left, ik_seeds, seed_names, TRANSIT_Z, label)
+        left, hover, eul_left, ik_seeds, seed_names,
+        TRANSIT_Z if ideal_tz is None else float(ideal_tz), label)
     print(f'  [左] 中转平面 {np.round(transit_z * 1000, 1)}mm —— {transit_note}')
     current_pos = left.pose[0]
     cur_z = current_pos[2]
@@ -688,11 +776,18 @@ def run_one_nut(cfg, runner, left, right, label, det, eul_left, R_BTC, t_BTC,
         runner._goto_pose(left, rise_xyz, eul_left,
                           f'{SIZE_NAMES_CN[label]}螺母 上升到中转平面', linear=True)
         dwell(0.15, '上升到位')
-    # 步骤2：MoveJP 水平横移到 hover 正上方（z 保持中转高度）
+    # 步骤2：水平横移到 hover 正上方（z 保持中转高度）
+    # 必须分段：这趟横移常常二三十厘米，一次 MoveJ 走完时数值 IK 会在中途
+    # 跳到另一个臂型分支（实测白螺母 26cm 横移报"最大单关节变化 196.6°"）。
+    # 按 25mm 切段、每段拿上一段的解当种子，臂型才连续。
     transit_xyz = np.array([hover[0], hover[1], transit_z])
-    print(f'  [左] MoveJP 水平横移到 {np.round(transit_xyz * 1000, 1)}mm（中转平面横移）...')
+    cur_xyz = np.asarray(left.pose[0], float) if left.pose is not None else None
+    t_dist = float(np.linalg.norm(transit_xyz - cur_xyz)) if cur_xyz is not None else 0.0
+    t_steps = max(2, int(round(t_dist / 0.025))) if t_dist > 0 else 1
+    print(f'  [左] MoveJP 水平横移到 {np.round(transit_xyz * 1000, 1)}mm'
+          f'（中转平面横移 {np.round(t_dist * 1000, 1)}mm，分 {t_steps} 段）...')
     move_via_ik(runner, left, transit_xyz, eul_left, ik_seeds, seed_names,
-                f'{SIZE_NAMES_CN[label]}螺母 中转平面横移')
+                f'{SIZE_NAMES_CN[label]}螺母 中转平面横移', steps=t_steps)
     dwell(0.15, '横移到位')
     # 步骤3：下降到 hover —— 同样走「外部 IK + MoveJ」，绕开 SDK 的 MoveL 规划器。
     # 每 25mm 分一段逐段 IK，路径贴近竖直直线；段数按实际落差算。
@@ -744,10 +839,32 @@ def run_one_nut(cfg, runner, left, right, label, det, eul_left, R_BTC, t_BTC,
         runner.run_leg(leg)
         dwell(cfg.between_leg_seconds, '左臂段间')
 
+    # 中央释放复核：run_leg 的 hand_after=open 已经发过张手，这里再补发一次。
+    # 话题不锁存，丢一次包左手就会一直攥着，右臂随后是对着"没松手的左手"去重抓。
+    print(f'  [左] 中央释放复核：补发一次张手 {cfg.hand_open_vals}，'
+          f'再等 {cfg.release_seconds:.1f}s 确认螺母已离手')
+    left.hand_open(cfg.hand_open_vals)
+    dwell(cfg.release_seconds, '中央释放复核')
+    if getattr(cfg, 'pause_handoff', False):
+        print(f'  [--pause-handoff] 左臂已张手。请确认螺母已离开左手、稳在中央交接点，')
+        print('    然后按回车让右臂去重抓（Ctrl-C 中止）。')
+        input()
+
     appr = apprs[label]
     print(f'  [右] 回放段 {appr.target}（按尺寸选段，段尾重抓{SIZE_NAMES_CN[label]}螺母）')
     runner.run_leg(appr, label=label)
     dwell(cfg.between_leg_seconds, '右臂段间')
+
+    if needle_target is not None:
+        # ---- 任务二：不回放入盒段，改成把螺母叠到铁针上 ----
+        # 释放姿态：默认用右臂重抓完的当前姿态（螺母平握、直接松手最自然，
+        # 且第一步不需要同时大角度换向）；要专门角度就配 needle.release_euler_deg。
+        eul_release = release_euler(cfg, right, places[label].end_pose['eul_deg'])
+        # IK 种子必须用右臂自己的录段臂型，不能借左臂的（会收敛到别的分支）。
+        r_seeds, r_names = right_ik_seed_bank(apprs, places)
+        place_at_needle(runner, right, needle_target, eul_release,
+                        r_seeds, r_names, cfg, label)
+        return
 
     leg = places[label]
     print(f'  [右] 回放段 {leg.target}（入盒释放）')
@@ -824,6 +941,30 @@ def ik_seed_bank(left_legs):
     names = ['当前关节角', f'{seed_leg.target} pt0（记录臂型）',
              f'{seed_leg.target} 末点（记录臂型）']
     return seed_leg, seeds, names
+
+
+def right_ik_seed_bank(apprs, places):
+    """右臂种子库（与 ik_seed_bank 同约定：names 比 seeds 多一个前置「当前关节角」）。
+
+    左臂录段的臂型给右臂当种子会让数值 IK 收敛到别的分支或直接失败 —— 任务二
+    首次实跑实测：中央重抓后竖直上升被判定"需要换臂型 73.9°"而中止。改用右臂
+    自己录段的真实臂型：approach 的 home/中央重抓点 + place 的中央/盒位释放点。
+    """
+    seeds, names, seen = [], ['当前关节角'], set()
+    for tag, table in (('approach', apprs), ('place', places)):
+        for k in SIZE_LABELS:
+            leg = table.get(k)
+            if leg is None or id(leg) in seen:
+                continue
+            seen.add(id(leg))
+            last = len(leg.joints) - 1
+            for idx in ((0, last) if last > 0 else (0,)):
+                q = leg.joints[idx]
+                if q is None:
+                    continue
+                seeds.append(q)
+                names.append(f'{tag}_{k} pt{idx}')
+    return seeds, names
 
 
 def precheck_grasp_ik(cfg, robot, ik_seeds, seed_names, label, det, eul_label,
@@ -908,6 +1049,16 @@ def execute(cfg, store, R_BTC, t_BTC, K, left_legs, apprs, places, release_leg,
         print(f'检测到 {len(detections)} 颗：'
               f'{", ".join(SIZE_NAMES_CN.get(d.label, d.label) for d in detections)}')
 
+        # ---- 任务二：双臂离场时检一次铁针（只检一次，之后一直用）----
+        needle_target = None
+        if getattr(cfg, 'place_at', 'box') == 'needle':
+            need = detect_needle(cfg, node, K, R_BTC, t_BTC)
+            opt = needle_options(cfg)
+            needle_target = release_target((need['x'], need['y']), opt)
+            print(f'  叠放目标（桌面 +{opt["release_height"] * 1000:.0f}mm）：'
+                  f'[{needle_target[0] * 1000:+.1f}, {needle_target[1] * 1000:+.1f}, '
+                  f'{needle_target[2] * 1000:+.1f}] mm')
+
         print('视觉抓取姿态（按尺寸）：')
         for k in cfg.order:
             eul_k, src_k = grasp_poses[k]
@@ -969,7 +1120,9 @@ def execute(cfg, store, R_BTC, t_BTC, K, left_legs, apprs, places, release_leg,
                     print(f'  {SIZE_NAMES_CN[label]}螺母新鲜视觉点 IK 复检通过。')
             stop = run_one_nut(cfg, runner, left, right, label, det,
                                grasp_poses[label][0],
-                               R_BTC, t_BTC, left_legs, apprs, places)
+                               R_BTC, t_BTC, left_legs, apprs, places,
+                               ik_seeds=ik_seeds, seed_names=seed_names,
+                               needle_target=needle_target)
             if stop == 'hover_stop':
                 print('已按 --stop-at-hover 停在 hover，退出（左臂保持当前姿态）。')
                 return
@@ -1009,12 +1162,18 @@ def main():
     p.add_argument('--allow-ik-fail', action='store_true',
                    help='裸 IK 预检全失败也继续：真实 MoveJP/MoveL 仍由驱动把关，'
                         '不可达会在该步安全中止。仅在对照探针证明是预检误判时使用')
+    p.add_argument('--pause-handoff', action='store_true',
+                   help='左臂中央释放后暂停，按回车再让右臂去重抓：用于现场确认'
+                        '螺母真的离开左手（左手张手丢包/螺母卡在指间时能立刻发现）')
     p.add_argument('--stop-at-hover', action='store_true',
                    help='真机只走到第一颗螺母正上方 hover 悬停位就停下（不下探/不闭合/不回放段），'
                         '用于现场核对视觉识别点到准备抓取位之间的偏差')
     p.add_argument('--stop-after-lift', action='store_true',
                    help='真机走到【闭合抓取 + 竖直上抬】就停下（不回放固定段、不做双臂交接），'
                         '用于单独验证左臂抓得稳不稳')
+    p.add_argument('--place-at', choices=('box', 'needle'), default='box',
+                   help='右臂最终放到哪：box=回放录制的入盒段（默认，任务一）；'
+                        'needle=开机检一次铁针，之后把每颗螺母依次叠到针上（任务二）')
     p.add_argument('--show', action='store_true',
                    help='YOLO 识别时弹窗实时显示画面/检测框（即使 yaml detector.show_window=false）')
     args = p.parse_args()
@@ -1024,8 +1183,10 @@ def main():
             args.config, arm_override=args.arm, order_override=args.order,
             detector_override=args.detector, speed_scale=args.speed)
         cfg.allow_ik_fail = bool(args.allow_ik_fail)
+        cfg.pause_handoff = bool(args.pause_handoff)
         cfg.stop_at_hover = bool(args.stop_at_hover)
         cfg.stop_after_lift = bool(args.stop_after_lift)
+        cfg.place_at = str(args.place_at)
         if args.show:
             cfg.detector_raw['show_window'] = True
         if args.speed != 1.0:
@@ -1072,6 +1233,19 @@ def main():
             print_plan(cfg, store, left_legs, apprs, places, release_leg,
                        detections, R, t, grasp_poses=grasp_poses,
                        ready_left=ready_left, ready_right=ready_right)
+            if cfg.place_at == 'needle':
+                opt = needle_options(cfg)
+                z_tab = float(release_target((0.0, 0.0), opt)[2])  # 桌面 + 释放高度
+                print('=' * 78)
+                print('【任务二·叠针】开机双臂离场时用 '
+                      f'{opt.get("model") or "weights/needle_pose_best.pt"} 识别一次铁针，'
+                      f'取 keypoint={opt.get("keypoint")} 的 (x0, y0) 作为叠放中心：')
+                print(f'  释放 z = 桌面 + {float(opt["release_height"]) * 1000:.0f}mm'
+                      f' = {z_tab * 1000:+.0f}mm;  横移净空 = 桌面 +'
+                      f'{float(opt["transit_clearance"]) * 1000:.0f}mm')
+                print('  每颗螺母：左臂视觉抓起 -> 中央释放 -> 右臂重抓 -> 直接横移到 '
+                      '(x0, y0) 上方 -> 降到释放点张手 -> 抬起；下一颗重复。')
+                print('  dry-run 不连相机，针的实际 (x0, y0) 只在 --execute 时打印。')
             print('\n[dry-run] 未驱动机器人。确认段表/交接点/抓取点后加 --execute 真机执行。')
     except TaskError as exc:
         print(f'\n[中止] {exc}', file=sys.stderr)

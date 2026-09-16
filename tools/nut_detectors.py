@@ -23,7 +23,7 @@ from pathlib import Path
 
 import numpy as np
 
-from nut_robot import SIZE_NAMES_CN, TaskError
+from nut_robot import ORDER_LABELS, SIZE_NAMES_CN, TaskError
 
 
 class DetectorAbort(TaskError):
@@ -71,8 +71,10 @@ def normalize(label, p_cam=None, u=None, v=None, z=None, K=None, frame=None,
     主流程跳过手眼变换；orientation 等附加信息放 extra 仅记录用。
     """
     label = str(label).strip().lower()
-    if label not in ('l', 'm', 's'):
-        raise TaskError(f'检测结果 label 只能是 l/m/s，收到 {label!r}')
+    if label not in ORDER_LABELS:
+        raise TaskError('检测结果 label 只能是 '
+                        f'{"".join(ORDER_LABELS)}（white=白螺母，与大黑螺母同形状），'
+                        f'收到 {label!r}')
     merged = dict(extra or {})
     if frame is not None:
         merged['frame'] = str(frame)

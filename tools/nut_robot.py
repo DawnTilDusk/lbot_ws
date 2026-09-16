@@ -13,8 +13,19 @@ from pathlib import Path
 import numpy as np
 import yaml
 
+# 物理尺寸档：右臂 approach/place 段、grasp_by_size、hand.sizes 都按这三档配置
 SIZE_LABELS = ('l', 'm', 's')
-SIZE_NAMES_CN = {'l': '大', 'm': '中', 's': '小'}
+# 识别标签 -> 物理尺寸档。白螺母与大黑螺母同形状，直接复用 l 档的全部参数，
+# 但检测标签仍保留 white，方便在彩色画面里区分白/黑。
+SHAPE_OF = {'l': 'l', 'm': 'm', 's': 's', 'white': 'l'}
+# 允许出现在 order / --order 里的标签（物理档 + 同形状别名）
+ORDER_LABELS = tuple(SHAPE_OF)
+SIZE_NAMES_CN = {'l': '大', 'm': '中', 's': '小', 'white': '白'}
+
+
+def shape_of(label):
+    """识别标签 -> 物理尺寸档（white -> l）；未知标签原样返回。"""
+    return SHAPE_OF.get(str(label), str(label))
 
 WORKSPACE = Path(__file__).resolve().parent.parent
 DEFAULT_CONFIG = WORKSPACE / '开发资源' / 'nut_sort' / 'nut_task.yaml'
@@ -114,8 +125,9 @@ class TaskConfig:
 
         order = order_override or d('order', ['l', 'm', 's'])
         order = [str(x).strip().lower() for x in order]
-        if not order or any(x not in SIZE_LABELS for x in order):
-            raise TaskError(f'order 只允许 l/m/s，当前 {order}')
+        if not order or any(x not in ORDER_LABELS for x in order):
+            raise TaskError(f'order 只允许 {"".join(ORDER_LABELS)}'
+                            f'（white=白螺母，与大黑螺母同形状），当前 {order}')
         if len(set(order)) != len(order):
             raise TaskError(f'order 有重复尺寸：{order}')
         self.order = tuple(order)
@@ -134,10 +146,11 @@ class TaskConfig:
         self.grasp_orientation_by_size = {}
         go_size = left.get('grasp_orientation_by_size', {}) or {}
         if not isinstance(go_size, dict):
-            raise TaskError('left.grasp_orientation_by_size 必须是 l/m/s 映射')
+            raise TaskError('left.grasp_orientation_by_size 必须是尺寸映射')
         for k, v in go_size.items():
-            if k not in SIZE_LABELS:
-                raise TaskError(f'left.grasp_orientation_by_size 只允许 l/m/s 键，当前 {k!r}')
+            if k not in ORDER_LABELS:
+                raise TaskError('left.grasp_orientation_by_size 只允许 '
+                                f'{"".join(ORDER_LABELS)} 键，当前 {k!r}')
             self.grasp_orientation_by_size[k] = _parse_grasp_orientation(
                 v, f'left.grasp_orientation_by_size.{k}')
         left_trace = left.get('trace', '')
@@ -169,7 +182,7 @@ class TaskConfig:
             # 三颗共用一条 approach 段（单段写法，向后兼容）
             leg = _parse_approach(appr, 'approach 段')
             self.approach_shared = True
-            self.right_approaches = {k: leg for k in SIZE_LABELS}
+            self.right_approaches = {k: leg for k in ORDER_LABELS}
             self.right_approach = leg
         elif isinstance(appr, dict):
             # 按尺寸分别给中央重抓段（中小螺母拇指高度不同时各调各的末点）
@@ -184,6 +197,13 @@ class TaskConfig:
             self.right_approach = self.right_approaches['l']  # 代表段：home/ready 接入
         else:
             raise TaskError('right.approach 必须是段映射（含 sequence）或 l/m/s 三段映射')
+        # 同形状别名（white -> l）：指向同一个 Leg 对象，下游按 label 取值不必特判
+        for lab in ORDER_LABELS:
+            if lab not in self.right_approaches:
+                src = SHAPE_OF.get(lab, lab)
+                if src not in self.right_approaches:
+                    raise TaskError(f'right.approach 缺 {src} 档，无法给 {lab} 复用')
+                self.right_approaches[lab] = self.right_approaches[src]
         self.right_ready = _parse_ready_spec('right', right.get('ready'), right_trace)
         place = right.get('place', {}) or {}
         self.right_place = {}
@@ -193,7 +213,7 @@ class TaskConfig:
             if leg[2] != 'open':
                 raise TaskError('右臂 place 段必须 hand_after: open（入盒释放）')
             self.place_shared = True
-            self.right_place = {k: leg for k in SIZE_LABELS}
+            self.right_place = {k: leg for k in ORDER_LABELS}
         else:
             self.place_shared = False
             for k in SIZE_LABELS:
@@ -205,6 +225,12 @@ class TaskConfig:
                 if leg[2] != 'open':
                     raise TaskError(f'右臂 place.{k} 段必须 hand_after: open（入盒释放）')
                 self.right_place[k] = leg
+        for lab in ORDER_LABELS:
+            if lab not in self.right_place:
+                src = SHAPE_OF.get(lab, lab)
+                if src not in self.right_place:
+                    raise TaskError(f'right.place 缺 {src} 档，无法给 {lab} 复用')
+                self.right_place[lab] = self.right_place[src]
         # 右臂 home = approach 第一段第一个点
 
         # ---- 运动参数 ----
@@ -214,6 +240,10 @@ class TaskConfig:
         self.linear_speed = float(m.get('linear_speed', 0.2))
         self.linear_acce = float(m.get('linear_acce', 0.2))
         self.hover_height = float(m.get('hover_height', 0.10))
+        # 中转平面高度的绝对覆盖（米，base_link z）。null=用 ideal（桌面+transit_height）。
+        # 现场某些螺母位置在理想高度会绕成折叠臂型时，直接写死一个更低的值。
+        raw_tz = m.get('transit_z')
+        self.transit_z = None if raw_tz is None else float(raw_tz)
         self.grasp_z_offset = float(m.get('grasp_z_offset', 0.0))
         # 抓稳后竖直抬起高度（相对下探终点 down 向上，独立于接近悬停 hover_height）
         try:
@@ -228,15 +258,17 @@ class TaskConfig:
         # 三种检测器（manual/input/yolo/...）在变到 base_link 之后统一施加。
         self.grasp_offset_xyz = _parse_grasp_offset(
             m.get('grasp_offset_xyz', [-0.15, 0.0, 0.0]), 'motion.grasp_offset_xyz')
-        # 按尺寸覆盖（motion.grasp_by_size.<l/m/s>）：offset_xyz/z_offset/hover_height/
+        # 按尺寸覆盖（motion.grasp_by_size.<l/m/s/white>）：offset_xyz/z_offset/hover_height/
         # lift_height 四个字段都可省，省的回退上面的全局值；大中小螺母几何不同时分别微调。
         self.grasp_by_size = {}
         gb = m.get('grasp_by_size', {}) or {}
         if not isinstance(gb, dict):
-            raise TaskError('motion.grasp_by_size 必须是 l/m/s 映射')
+            raise TaskError('motion.grasp_by_size 必须是尺寸映射')
         for k, v in gb.items():
-            if k not in SIZE_LABELS:
-                raise TaskError(f'motion.grasp_by_size 只允许 l/m/s 键，当前 {k!r}')
+            # 允许 white：需要单独给白螺母调偏移时覆盖，不写就自动复用 l 档
+            if k not in ORDER_LABELS:
+                raise TaskError('motion.grasp_by_size 只允许 '
+                                f'{"".join(ORDER_LABELS)} 键，当前 {k!r}')
             if not isinstance(v, dict):
                 raise TaskError(f'motion.grasp_by_size.{k} 必须是映射'
                                 f'（offset_xyz/z_offset/hover_height/lift_height 任选）')
@@ -350,7 +382,7 @@ class TaskConfig:
                 self._hand_close_arm[arm] = _hand6(close_cfg[arm], f'hand.close.{arm}')
         sizes = h.get('sizes', {}) or {}
         self._hand_close = {}
-        for k in SIZE_LABELS:
+        for k in ORDER_LABELS:
             raw = sizes.get(k)
             if raw is None:
                 entry = {}
@@ -364,6 +396,9 @@ class TaskConfig:
             else:
                 raise TaskError(f'hand.sizes.{k} 必须是列表或映射')
             self._hand_close[k] = entry
+
+        # ---- 任务二：铁针目标（--place-at needle 时用）----
+        self.needle_raw = d('needle', {}) or {}
 
         # ---- 视觉 ----
         v = d('vision', {}) or {}
@@ -425,28 +460,40 @@ class TaskConfig:
             raise TaskError(f'detector.redetect_each_nut 必须是 true/false，当前 {raw_redetect!r}')
         self.redetect_each_nut = raw_redetect
 
+    def _size_entry(self, label):
+        """grasp_by_size 里该标签的条目：先精确匹配 label，再按同形状档匹配。"""
+        entry = self.grasp_by_size.get(label)
+        if entry is None:
+            entry = self.grasp_by_size.get(shape_of(label))
+        return entry or {}
+
     def grasp_orientation_for(self, label):
         """label 尺寸的视觉抓取姿态源 (位姿库名|None, 记录段映射|None)：覆盖 > 全局。"""
         ov = self.grasp_orientation_by_size.get(label)
+        if ov is None:
+            ov = self.grasp_orientation_by_size.get(shape_of(label))
         return ov if ov is not None else (self.left_grasp_pose_name, self.grasp_orientation_rec)
 
     def grasp_offset_for(self, label):
         """label 尺寸的检测点->腕部目标平移：grasp_by_size 覆盖 > 全局。"""
-        return self.grasp_by_size.get(label, {}).get('offset_xyz', self.grasp_offset_xyz)
+        return self._size_entry(label).get('offset_xyz', self.grasp_offset_xyz)
 
     def grasp_z_offset_for(self, label):
-        return self.grasp_by_size.get(label, {}).get('z_offset', self.grasp_z_offset)
+        return self._size_entry(label).get('z_offset', self.grasp_z_offset)
 
     def hover_height_for(self, label):
-        return self.grasp_by_size.get(label, {}).get('hover_height', self.hover_height)
+        return self._size_entry(label).get('hover_height', self.hover_height)
 
     def lift_height_for(self, label):
         """抓稳后相对 down 竖直上抬的高度：grasp_by_size 覆盖 > 全局（缺省 0.05m）。"""
-        return self.grasp_by_size.get(label, {}).get('lift_height', self.lift_height)
+        return self._size_entry(label).get('lift_height', self.lift_height)
 
     def close_for(self, arm, label):
         """该臂抓 label 螺母时的 6 路闭合值：尺寸级 arm > 尺寸级 joint > 臂默认。"""
-        entry = self._hand_close.get(label, {})
+        entry = self._hand_close.get(label)
+        if entry is None:
+            entry = self._hand_close.get(shape_of(label))
+        entry = entry or {}
         if arm in entry:
             return entry[arm]
         if 'joint' in entry:
@@ -690,8 +737,18 @@ class RobotClient:
         self._publish_hand('speed', speed)
         self._publish_hand('force', force)
 
-    def hand_open(self, values):
-        self._publish_hand('joint', values)
+    def hand_open(self, values, repeat=3, gap=0.25):
+        """张开手。
+
+        话题不锁存，而且手在受力/保护状态下可能忽略单次位置命令 —— 现场实测过
+        「张手指令确实发了、日志也打了、手指就是不动，螺母被左臂原样带回」。
+        所以默认连发 repeat 轮、每轮间隔 gap 秒，给手足够时间执行；
+        这里多发几包的成本远低于一次把螺母带走的代价。
+        """
+        for i in range(max(1, int(repeat))):
+            self._publish_hand('joint', values)
+            if i < int(repeat) - 1 and gap > 0:
+                time.sleep(float(gap))
 
     def hand_close(self, values, settle=0.0):
         self._publish_hand('joint', values)

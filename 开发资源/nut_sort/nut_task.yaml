@@ -20,7 +20,10 @@ namespace: /robot1
 arm: right                 # 只给 capture_task_pose 选默认臂用；任务固定双臂
 
 # 抓取顺序选项：l=大 m=中 s=小；任意排列，如 [l,m,s] / [s,m,l] / [m,l,s]
-order: [l, m, s]
+# 抓取顺序。white = 白螺母：与大黑螺母同形状，自动复用 l 档的 approach/place/
+# grasp_by_size/hand.sizes 参数，只有检测标签不同（画面里仍显示为「白」）。
+# 任务一（入盒）不需要白螺母时，把 white 删掉即可。
+order: [white, l, m, s]
 require_all: false          # true=缺一颗中止；false=只抓检测到的
 
 check_other_arm: true      # 序列加载/回放时校验另一只臂静止（录制时另一只臂必须停着）
@@ -99,10 +102,15 @@ motion:
   #   hover_height= 接近悬停高度（同全局 hover_height；必须严格大于 z_offset，否则
   #                 接近段上抬、抓后回 hover 下杵桌面，加载配置即报错）
   #   lift_height = 抓稳后相对下探终点竖直上抬多高再回放固定段（缺省用上面的 0.05）
+  # 中转平面绝对高度覆盖（米，base_link z）。null = 用默认理想高度（桌面 -0.44 + 0.25 = -190mm）。
+  # 某颗螺母在理想高度横移会绕成折叠臂型、触发换臂型保护时，写死一个更低的值，
+  # 例如 -0.24 就是 -240mm（之前中/小螺母实测就是用 -240 才解得开）。
+  transit_z: null
+
   grasp_by_size:
-    l: {offset_xyz: [-0.01, -0.03, 0.0], z_offset: 0.09, hover_height: 0.12}
-    m: {offset_xyz: [-0.022, -0.053, 0.0], z_offset: 0.08, hover_height: 0.12}
-    s: {offset_xyz: [-0.029, -0.035, 0.0], z_offset: 0.072, hover_height: 0.12}
+    l: {offset_xyz: [-0.01, -0.03, 0.0], z_offset: 0.087, hover_height: 0.12}
+    m: {offset_xyz: [-0.022, -0.053, 0.0], z_offset: 0.082, hover_height: 0.12}
+    s: {offset_xyz: [-0.029, -0.035, 0.0], z_offset: 0.074, hover_height: 0.12}
 
   # 序列段：逐点 MoveJ
   join_speed: 0.3          # 接入序列起点 / retreat 回 home 的慢速 MoveJ
@@ -143,7 +151,7 @@ hand:
   open: [185, 80, 255, 255, 255, 255]
   # 各臂闭合默认值（2026-09-10 现场给定，三颗螺母先共用；当晚小拇指也改为闭合 0，原 255 为张开）
   close:
-    left:  [0, 0, 0, 0, 0, 0]
+    left:  [20, 0, 0, 0, 0, 0]
     right: [0, 0, 0, 0, 0, 0]  # 双臂六路全闭（2026-09-11 现场调定值）
   # 若某尺寸要单独手型，按尺寸覆盖（优先级高于 close），三种写法：
   # sizes:
@@ -153,7 +161,32 @@ hand:
   # 小螺母专用手型（2026-09-16 现场调试）：四指弯曲 40；拇指弯曲/侧摆暂保持 0。
   # 只写 left：右臂抓 s 仍用 close.right 默认值（交接尚未调试）。
   sizes:
-    s: {left: [0, 0, 40, 40, 40, 40]}
+    s: {left: [20, 0, 40, 40, 40, 40]}
+
+# ---- 任务二：把螺母叠到玻璃盘中央的铁针上（--place-at needle 启用）----
+needle:
+  model: weights/needle_pose_best.pt   # 两关键点 Pose 模型（tip=游离端 / base=底座连接处）
+  # 用哪个关键点的像素定 (x0,y0)。细杆深度不可靠时优先 base（根部更实、
+  # 深度更容易落在针座或玻璃盘上）；tip 是悬空端，深度常打到底座或背景。
+  keypoint: base
+  release_height: 0.20                 # 释放点高于桌面多少米（任务要求 20cm）
+  transit_clearance: 0.10              # 水平横移平面再高出释放点多少米
+  min_confidence: 0.5                  # 关键点置信度下限，低于此值判无效
+  # 叠针全程的目标末端姿态（三欧拉角，度）。null = 用右臂重抓完的当前抓握姿态：
+  # 螺母本来就是平着抓的，直接松手最自然；而且竖直上升不必同时大角度换向
+  # （换向和上升叠在一起会让单关节变化超过保护阈值，被判定"换臂型"中止）。
+  # 现场发现穿针角度不对时，再把这里写成具体的 [x, y, z] 度示教值。
+  release_euler_deg: null
+  # 叠针每段允许的最大单关节变化（度），超过就拒绝抡臂、运动前中止。
+  # 报"需要换臂型"且确认路径无干涉时可以调到 90 再试。
+  max_joint_diff_deg: 60.0
+  # 叠放点在针的 (x0,y0) 基础上再补的平移 [dx, dy, dz]（米，base_link 系）。
+  # 视觉给的针位和"螺母实际该落在哪"有系统性偏差时用这个微调：
+  #   +X = 机器人前方，+Y = 机器人左侧（方向与直觉相反就反号）。
+  # 高度一般用 release_height 调，dz 留 0。
+  release_offset_xyz: [-0.075, -0.077, 0.0]
+  # 兜底：关键点处深度无效时，用这个固定深度（米，相机系 Z）代替；null=不兜底直接报错
+  fallback_depth: null
 
 # ---- 视觉话题与标定 ----
 vision:

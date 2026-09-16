@@ -160,6 +160,27 @@ class AnnotateTests(unittest.TestCase):
         self.assertEqual(out.shape, self.COLOR.shape)
         self.assertFalse(np.array_equal(out, self.COLOR))
 
+    def test_pose_records_draw_keypoints_instead_of_center(self):
+        # 铁针是 Pose 模型：记录里没有中心 u/v，只有 tip/base 关键点，不能 KeyError
+        pose = [{'label': 'needle', 'task': 'pose', 'confidence': .87,
+                 'bbox': [10.0, 10.0, 40.0, 55.0],
+                 'keypoints': [{'name': 'tip', 'u': 15.0, 'v': 14.0,
+                                'valid': True, 'confidence': .91},
+                               {'name': 'base', 'u': 25.0, 'v': 50.0,
+                                'valid': True, 'confidence': .95}]}]
+        out = annotate(self.COLOR, pose, status='1 record(s) (raw)')
+        self.assertEqual(out.shape, self.COLOR.shape)
+        self.assertFalse(np.array_equal(out, self.COLOR))
+
+    def test_pose_record_without_valid_keypoint_still_renders(self):
+        pose = [{'label': 'needle', 'task': 'pose', 'confidence': .3,
+                 'bbox': [10.0, 10.0, 40.0, 55.0],
+                 'keypoints': [{'name': 'tip', 'u': None, 'v': None,
+                                'valid': False, 'confidence': .1}]}]
+        out = annotate(self.COLOR, pose)
+        self.assertEqual(out.shape, self.COLOR.shape)
+        self.assertFalse(np.array_equal(out, self.COLOR))
+
 
 class _FakeCv2:
     """记录 imshow/waitKey 调用，键值按序列返回；-1&0xFF=255 表示无键。"""

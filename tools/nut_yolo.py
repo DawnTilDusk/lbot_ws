@@ -38,11 +38,29 @@ def annotate(color, records, located=None, failed_label=None, status=None):
         by_center[(int(round(det.u)), int(round(det.v)))] = det
     for r in records:
         x1, y1, x2, y2 = [int(round(float(v))) for v in r['bbox']]
-        u, v = int(round(float(r['u']))), int(round(float(r['v'])))
         label = str(r['label'])
         bad = label == failed_label
         box_color = (0, 0, 255) if bad else (0, 255, 0)
         cv2.rectangle(canvas, (x1, y1), (x2, y2), box_color, 2)
+        if r.get('u') is None or r.get('v') is None:
+            # Pose 模型（铁针）：没有框中心，只有 tip/base 关键点
+            kps = [k for k in (r.get('keypoints') or [])
+                   if k.get('u') is not None and k.get('v') is not None]
+            for k in kps:
+                ku, kv = int(round(float(k['u']))), int(round(float(k['v'])))
+                kc = (0, 255, 255) if str(k.get('name')) == 'tip' else (255, 0, 255)
+                cv2.drawMarker(canvas, (ku, kv), kc, cv2.MARKER_CROSS, 18, 2)
+                _put_text(canvas, f"{k.get('name')} "
+                                  f"{float(k.get('confidence') or 0.):.2f} ({ku},{kv})",
+                          (ku + 8, max(18, kv - 8)), scale=.5, color=kc)
+            text = f"{label} {float(r['confidence']):.2f}"
+            if not kps:
+                text += ' NO VALID KEYPOINT'
+                box_color = (0, 0, 255)
+            _put_text(canvas, text, (x1, max(18, y1 - 6)),
+                      color=(0, 0, 255) if bad else (0, 255, 255))
+            continue
+        u, v = int(round(float(r['u']))), int(round(float(r['v'])))
         cv2.drawMarker(canvas, (u, v), (0, 0, 255), cv2.MARKER_CROSS, 16, 2)
         text = f"{label} {float(r['confidence']):.2f} ({u},{v})"
         det = by_center.get((u, v))
@@ -101,7 +119,17 @@ class DetectionWindow:
 
     def result(self, color, records, located=None, failed_label=None, status=None):
         if self.enabled:
-            self._show(annotate(color, records, located, failed_label, status))
+            # 画框只是给人看的：标注本身出错也绝不能中断识别/抓取流程
+            try:
+                img = annotate(color, records, located, failed_label, status)
+            except Exception as exc:  # noqa: BLE001
+                img = color.copy()
+                try:
+                    _put_text(img, f'annotate error: {exc}', (8, 24),
+                              scale=.55, color=(0, 0, 255))
+                except Exception:  # noqa: BLE001
+                    pass
+            self._show(img)
 
     def dwell(self):
         """结果画面停留 show_seconds；q/ESC 中止，空格/回车立即放行。"""
@@ -157,6 +185,9 @@ def infer_pixels(image, cfg):
                '--model', str(model), '--image', str(image_path), '--output', str(result_path),
                '--conf', str(cfg.get('confidence', .5)), '--imgsz', str(cfg.get('imgsz', 640)),
                '--device', str(cfg.get('device', 'cpu'))]
+        if cfg.get('allow_pose'):
+            # 铁针是 Pose 模型；nut_yolo_infer 默认拒绝，必须显式放行
+            cmd.append('--allow-pose')
         env = os.environ.copy()
         # ROS PYTHONPATH 含系统二进制扩展，不传进 Conda。
         env.pop('PYTHONPATH', None)
@@ -240,7 +271,11 @@ class YoloDetector:
         self.cfg = sub_cfg
         self.snapshot = None
 
-    def detect(self, expected):
+    def detect(self, expected, raw=False):
+        """expected 给定时只返回这些标签；raw=True 时不过 locate()，
+        直接返回 (records, color, depth, camera) —— 给 pose 模型用：
+        关键点记录没有 u/v，走 locate() 会 KeyError，选点逻辑交给调用方。
+        """
         if self.node is None:
             raise TaskError('YOLO 需要实时彩色/深度；使用 nut_yolo_preview.py，或主流程 --detector yolo')
         import rclpy
@@ -303,6 +338,14 @@ class YoloDetector:
                 raise TaskError('camera_info 与彩色分辨率不匹配')
             if ext.get('parent_frame') != 'base_link' or ext.get('child_frame') != camera['frame_id']:
                 raise TaskError('外参坐标系与实时彩色相机不匹配，不能直接交给 base_link 抓取流程')
+            if raw:
+                # pose 模型（铁针）：不做中心反投影，原样交给调用方
+                self.snapshot = dict(color=c[2], depth=d[2], K=camera['K'],
+                                     color_stamp=c[0], depth_stamp=d[0],
+                                     frame_id=camera['frame_id'])
+                window.result(c[2], records, status=f'{len(records)} record(s) (raw)')
+                window.dwell()
+                return records, c[2], d[2], camera
             window.result(c[2], records,
                           status=f'{len(records)} box(es), sampling aligned depth ...')
             try:

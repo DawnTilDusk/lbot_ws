@@ -25,7 +25,8 @@ from nut_pick_place import (cam_to_base, det_base_xyz, detect_until_complete,
                             grasp_points, handoff_check,
                             ik_diagnose, join_gap_rows, load_all_legs, parse_order,
                             resolve_grasp_euler, resume_ready_for_detect,
-                            validate_detections)
+                            right_ik_seed_bank, validate_detections)
+from nut_needle import grip_euler_rad, needle_options, release_euler
 
 WORKSPACE = Path(__file__).resolve().parent.parent
 LEFT_TRACE = WORKSPACE / 'recordings/left_trace/events.jsonl'
@@ -104,9 +105,17 @@ class ConfigAndLegsTest(unittest.TestCase):
     def test_real_default_config_loads(self):
         cfg = TaskConfig(DEFAULT_CONFIG)
         self.assertEqual(cfg.namespace, '/robot1')
-        self.assertEqual(cfg.order, ('l', 'm', 's'))
+        self.assertEqual(cfg.order, ('white', 'l', 'm', 's'))
         self.assertEqual(cfg.left_grasp_pose_name, 'left_grasp_init')
         self.assertFalse(cfg.require_all)
+        # 白螺母与大黑螺母同形状：段/抓取偏移/手型全部复用 l 档，只有检测标签不同
+        self.assertIs(cfg.right_approaches['white'], cfg.right_approaches['l'])
+        self.assertIs(cfg.right_place['white'], cfg.right_place['l'])
+        np.testing.assert_allclose(cfg.grasp_offset_for('white'), cfg.grasp_offset_for('l'))
+        self.assertEqual(cfg.grasp_z_offset_for('white'), cfg.grasp_z_offset_for('l'))
+        self.assertEqual(cfg.hover_height_for('white'), cfg.hover_height_for('l'))
+        self.assertEqual(cfg.close_for('left', 'white'), cfg.close_for('left', 'l'))
+        self.assertEqual(cfg.close_for('right', 'white'), cfg.close_for('right', 'l'))
 
     def test_leg_specs_parsed(self):
         self.assertEqual(len(self.cfg.left_legs), 2)
@@ -228,9 +237,11 @@ class ConfigAndLegsTest(unittest.TestCase):
     def test_real_config_arm_close_defaults(self):
         cfg = TaskConfig(DEFAULT_CONFIG)
         for k in SIZE_LABELS:
-            # 左臂 s 走 hand.sizes.s 覆盖（小螺母专用手型：四指弯曲 40）
-            expect = [0, 0, 40, 40, 40, 40] if k == 's' else [0, 0, 0, 0, 0, 0]
+            # 左臂拇指弯曲 20（2026-09-16 现场：抓取前拇指多弯 20）；
+            # s 另走 hand.sizes.s 覆盖（小螺母专用手型：四指弯曲 40）
+            expect = [20, 0, 40, 40, 40, 40] if k == 's' else [20, 0, 0, 0, 0, 0]
             self.assertEqual(cfg.close_for('left', k), expect)
+            # 右臂未改，仍是六路全闭
             self.assertEqual(cfg.close_for('right', k), [0, 0, 0, 0, 0, 0])
 
     def test_real_config_open_and_pacing(self):
@@ -1667,6 +1678,91 @@ class _CfgStub:
         self.order = tuple(order)
         self.require_all = require_all
         self.duplicate_policy = policy
+
+
+class _NeedleCfgStub:
+    def __init__(self, **needle):
+        self.needle_raw = needle
+
+
+class _PoseRobotStub:
+    """只带末端位姿反馈的最小机器人桩（pose = (xyz, quat_xyzw)）。"""
+    def __init__(self, quat=None):
+        self.pose = None if quat is None else (np.zeros(3), np.asarray(quat, float))
+
+
+class RightSeedBankAndNeedleEulerTest(unittest.TestCase):
+    """任务二：右臂种子库 + 叠针释放姿态。"""
+
+    def setUp(self):
+        self.cfg = TaskConfig(DEFAULT_CONFIG)
+        self.left_legs, self.apprs, self.places, *_ = load_all_legs(self.cfg)
+
+    def test_right_seed_bank_names_align_with_seeds(self):
+        seeds, names = right_ik_seed_bank(self.apprs, self.places)
+        # move_via_ik 的约定：names[0] 是「当前关节角」，比 seeds 多一个
+        self.assertEqual(len(names), len(seeds) + 1)
+        self.assertEqual(names[0], '当前关节角')
+        self.assertTrue(seeds)
+        self.assertTrue(all(len(np.asarray(q)) == 7 for q in seeds))
+
+    def test_right_seed_bank_dedupes_shared_size_legs(self):
+        # white 复用 l 档 -> 同一 Leg 对象被两个尺寸指向，只能取一次
+        apprs = dict(self.apprs, white=self.apprs['l'])
+        places = dict(self.places, white=self.places['l'])
+        base_seeds, _ = right_ik_seed_bank(self.apprs, self.places)
+        seeds, names = right_ik_seed_bank(apprs, places)
+        self.assertEqual(len(seeds), len(base_seeds))
+        self.assertEqual(len(set(names)), len(names))
+        # 种子必须来自右臂自己的录段端点，而不是左臂的臂型
+        known = set()
+        for table in (self.apprs, self.places):
+            for k in SIZE_LABELS:
+                leg = table[k]
+                known.add(tuple(np.asarray(leg.joints[0])))
+                known.add(tuple(np.asarray(leg.joints[-1])))
+        self.assertTrue(seeds)
+        for q in seeds:
+            self.assertIn(tuple(np.asarray(q)), known)
+
+    def test_grip_euler_rad_matches_recorded_convention(self):
+        from scipy.spatial.transform import Rotation as Rot
+        want = [10.0, -5.0, 30.0]
+        q = Rot.from_euler('xyz', want, degrees=True).as_quat()
+        got = np.degrees(grip_euler_rad(_PoseRobotStub(q)))
+        np.testing.assert_allclose(got, want, atol=1e-6)
+        self.assertIsNone(grip_euler_rad(_PoseRobotStub(None)))
+
+    def test_release_euler_precedence(self):
+        from scipy.spatial.transform import Rotation as Rot
+        q = Rot.from_euler('xyz', [1.0, 2.0, 3.0], degrees=True).as_quat()
+        robot = _PoseRobotStub(q)
+        # 1) 显式配置优先
+        cfg = _NeedleCfgStub(release_euler_deg=[40.0, 0.0, 90.0])
+        np.testing.assert_allclose(np.degrees(release_euler(cfg, robot, [7., 7., 7.])),
+                                   [40.0, 0.0, 90.0], atol=1e-6)
+        # 2) 未配置 -> 当前抓握姿态
+        np.testing.assert_allclose(
+            np.degrees(release_euler(_NeedleCfgStub(), robot, [7., 7., 7.])),
+            [1.0, 2.0, 3.0], atol=1e-6)
+        # 3) 无姿态反馈 -> 回退入盒段末点姿态
+        np.testing.assert_allclose(
+            np.degrees(release_euler(_NeedleCfgStub(), _PoseRobotStub(None), [7., 8., 9.])),
+            [7.0, 8.0, 9.0], atol=1e-6)
+
+    def test_needle_options_validates_new_keys(self):
+        opt = needle_options(self.cfg)
+        self.assertIsNone(opt['release_euler_deg'])
+        self.assertAlmostEqual(opt['max_joint_diff_deg'], 60.0)
+        np.testing.assert_allclose(
+            needle_options(_NeedleCfgStub(release_euler_deg=[1, 2, 3]))['release_euler_deg'],
+            [1, 2, 3])
+        with self.assertRaises(TaskError):
+            needle_options(_NeedleCfgStub(release_euler_deg=[1, 2]))
+        with self.assertRaises(TaskError):
+            needle_options(_NeedleCfgStub(max_joint_diff_deg=0))
+        with self.assertRaises(TaskError):
+            needle_options(_NeedleCfgStub(max_joint_diff_deg='x'))
 
 
 if __name__ == '__main__':
