@@ -314,6 +314,17 @@ class YoloDetector:
                               status='depth invalid at marked box center (aborting)')
                 window.dwell()
                 raise
+            # detect(expected) 约定：只返回 caller 要的尺寸
+            # （与 JsonDetector / InputDetector 一致）。四类模型的 white 等
+            # 非抓取标签在此丢弃，避免流进抓取流程触发 KeyError。
+            if expected:
+                dropped = sorted({str(d.label) for d in detections
+                                   if d.label not in expected})
+                detections = [d for d in detections if d.label in expected]
+                if dropped:
+                    self.node.get_logger().warning(
+                        '已忽略非抓取目标（不在 %s 中）：%s'
+                        % ('/'.join(map(str, expected)), '、'.join(dropped)))
             n = len(detections)
             window.result(c[2], records, located=detections,
                           status=f'{n} nut(s) localized — auto in {window.seconds:g}s, space=go, q=abort')

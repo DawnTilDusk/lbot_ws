@@ -594,24 +594,59 @@ class RobotClient:
             raise TaskError(f'{self.arm} 臂上使能失败')
 
     def ik_try(self, position, euler_rad, seed, timeout=8.0):
-        """单次驱动逆解。seed=None 时 joints 留空（驱动按 srv 注释自行读当前角）。
+        """单次驱动逆解。seed 必须是长度 7 的关节角序列。
         返回 'ok' / 'fail'（服务明确返回不可解）/ 'timeout'（服务无响应）。
+
+        ⚠ 绝不发空 joints（seed=None）：驱动源码在 request->joints.empty() 时把
+        initial_ptr = nullptr 传给 lbot_inverse_kinematics，而厂商 SDK 的
+        lbot_create_ik_request 会解引用它 —— 实测直接段错误，崩溃地址固定为
+        liblbot_api_cpp.so[add0] == lbot_create_ik_request+0x50，整个驱动进程死掉。
+        srv 注释号称空数组=驱动自读当前角，但实现不支持，必须给真种子。
         """
+        status, _ = self.ik_try_full(position, euler_rad, seed, timeout)
+        return status
+
+    def ik_try_full(self, position, euler_rad, seed, timeout=8.0):
+        """同 ik_try，但成功时把解出的关节角一并返回。
+        返回 ('ok' | 'fail' | 'timeout', joints | None)。
+        """
+        if seed is None:
+            raise TaskError('ik 系列不接受空种子：会把 nullptr 交给 SDK 并段错误'
+                            '（lbot_create_ik_request+0x50）')
         req = self.ik_cli.srv_type.Request()
         req.position.x, req.position.y, req.position.z = [float(v) for v in position]
         req.euler.x, req.euler.y, req.euler.z = [float(v) for v in euler_rad]
-        req.joints = [float(x) for x in seed] if seed is not None else []
+        req.joints = [float(x) for x in seed]
         res = self._spin_call(self.ik_cli, req, timeout=timeout)
         if res is None:
-            return 'timeout'
-        return 'ok' if bool(res.success) else 'fail'
+            return 'timeout', None
+        if bool(res.success):
+            return 'ok', [float(v) for v in res.joints]
+        return 'fail', None
+
+    def ik_solve(self, position, euler_rad, extra_seeds=None):
+        """多种子逆解并把关节角带回来：返回 (joints, 成功种子下标)，全失败 (None, None)。
+
+        与 ik_check 同策略（当前关节角 -> 记录段臂型种子）。存在的理由：
+        lbot_move_pose 内部自己做 IK 且不接受初值，解落在另一个臂型分支时会失败
+        （实测中螺母中转横移：外部用记录臂型种子可解，MoveJP 却被拒）。
+        拿到关节角后即可用 MoveJ 执行同一目标。
+        """
+        seeds = [self.joints] + [s for s in (extra_seeds or []) if s is not None]
+        for idx, seed in enumerate(seeds):
+            status, joints = self.ik_try_full(position, euler_rad, seed)
+            if status == 'ok' and len(joints or []) == 7:
+                return joints, idx
+        return None, None
 
     def ik_check(self, position, euler_rad, extra_seeds=None):
         """可达性预检。驱动数值逆解以 joints 为初始种子，臂型离目标远时会单纯因种子
-        收敛失败（而非真不可达）。故依次尝试：当前关节角 -> 调用方给的记录段臂型种子
-        -> 空种子（驱动自行读当前角）。返回 (是否可达, 成功种子序号/None)。
+        收敛失败（而非真不可达）。故依次尝试：当前关节角 -> 调用方给的记录段臂型种子。
+        返回 (是否可达, 成功种子序号/None)。
+
+        ⚠ 种子里绝不能带 None（空 joints）：会让驱动段错误，见 ik_try 的说明。
         """
-        seeds = [self.joints] + list(extra_seeds or []) + [None]
+        seeds = [self.joints] + [s for s in (extra_seeds or []) if s is not None]
         for idx, seed in enumerate(seeds):
             if self.ik_try(position, euler_rad, seed) == 'ok':
                 return True, idx

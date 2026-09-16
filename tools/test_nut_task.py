@@ -228,12 +228,14 @@ class ConfigAndLegsTest(unittest.TestCase):
     def test_real_config_arm_close_defaults(self):
         cfg = TaskConfig(DEFAULT_CONFIG)
         for k in SIZE_LABELS:
-            self.assertEqual(cfg.close_for('left', k), [0, 0, 0, 0, 0, 0])
+            # 左臂 s 走 hand.sizes.s 覆盖（小螺母专用手型：四指弯曲 40）
+            expect = [0, 0, 40, 40, 40, 40] if k == 's' else [0, 0, 0, 0, 0, 0]
+            self.assertEqual(cfg.close_for('left', k), expect)
             self.assertEqual(cfg.close_for('right', k), [0, 0, 0, 0, 0, 0])
 
     def test_real_config_open_and_pacing(self):
         cfg = TaskConfig(DEFAULT_CONFIG)
-        self.assertEqual(cfg.hand_open_vals, [200, 80, 255, 255, 255, 255])
+        self.assertEqual(cfg.hand_open_vals, [185, 80, 255, 255, 255, 255])
         for attr in ('ready_hold_seconds', 'point_dwell_seconds',
                      'between_leg_seconds', 'pre_hand_seconds', 'hover_dwell_seconds'):
             self.assertGreater(getattr(cfg, attr), 0)
@@ -794,7 +796,8 @@ class SharedPlaceRealRecordingTest(unittest.TestCase):
         def fake_spin(cli, req, timeout):
             calls.append(list(req.joints))
             ok = len(calls) > 1  # 第一种子(当前角)失败，其余通过
-            return type('R', (), {'success': ok})()
+            return type('R', (), {'success': ok,
+                                  'joints': [0.1] * 7 if ok else []})()
         rc._spin_call = fake_spin
         rc.joints = [0.0] * 7
         ok, used = rc.ik_check([0.3, 0.3, -0.3], [0.9, 0, -1.5],
@@ -802,9 +805,14 @@ class SharedPlaceRealRecordingTest(unittest.TestCase):
         self.assertTrue(ok)
         self.assertEqual(used, 1)
         self.assertEqual(len(calls), 2)
+        # 回归保护：ik 系列绝不能发空 joints —— 驱动在 request->joints.empty()
+        # 时把 nullptr 交给 SDK，lbot_create_ik_request+0x50 直接段错误，
+        # 整个驱动进程死掉（2026-09-16 定位）。
+        self.assertTrue(all(len(c) == 7 for c in calls), f'出现空种子调用：{calls}')
 
         def all_fail(cli, req, timeout):
-            return type('R', (), {'success': False})()
+            calls.append(list(req.joints))
+            return type('R', (), {'success': False, 'joints': []})()
         rc._spin_call = all_fail
         ok, used = rc.ik_check([0.3, 0.3, -0.3], [0.9, 0, -1.5],
                                extra_seeds=[[1.0] * 7, [2.0] * 7])

@@ -351,7 +351,7 @@ def print_plan(cfg, store, left_legs, apprs, places, release_leg, detections, R_
         print(f'    {SIZE_NAMES_CN[k]}({k}): 偏移 {off_mm} mm{ov}，'
               f'hover +{cfg.hover_height_for(k)*1000:.0f}mm，'
               f'down {cfg.grasp_z_offset_for(k)*1000:+.0f}mm')
-    print(f'  【手型】张开 {cfg.hand_open_vals}；闭合值（顺序[拇指侧摆,拇指弯曲,食,中,无名,小]）')
+    print(f'  【手型】张开 {cfg.hand_open_vals}；闭合值（顺序[拇指弯曲,拇指侧摆,食,中,无名,小]，255=全张 0=全闭）')
     for k in cfg.order:
         print(f'    {SIZE_NAMES_CN[k]}({k}): 左 {cfg.close_for("left", k)}  '
               f'右 {cfg.close_for("right", k)}')
@@ -552,6 +552,107 @@ def resume_ready_for_detect(cfg, runner, left, right, left_legs, apprs,
     time.sleep(cfg.ready_hold_seconds)
 
 
+def move_via_ik(runner, robot, position, euler, ik_seeds, seed_names, where,
+                max_joint_diff_deg=60.0, steps=1):
+    """用「我们算 IK + MoveJ 执行」走完一段笛卡尔运动，完全绕开 SDK 内部 IK。
+
+    为什么需要：驱动暴露的两个笛卡尔接口都在 SDK 内部自己做 IK，且都不接受初值，
+    失败时还只回一个空错误串（看不到原因）：
+        lbot_move_pose  (MoveJP) -> 解落在另一个臂型分支时失败
+        lbot_move_linear(MoveL)  -> 直线路径规划失败
+    而 lbot_move_joint(MoveJ) 只收关节角、不做任何 IK。所以把 IK 搬到我们这边
+    （多种子、可预检、失败即运动前中止、可核对换臂型幅度），SDK 只负责执行。
+
+    steps>1 时把线段按笛卡尔等分逐段 IK 再 MoveJ：路径贴近直线，不会像单次关节
+    插值那样鼓出去；每段拿上一段的关节解当种子，保证臂型连续、不跳分支。
+
+    换臂型幅度过大时中止而不是抡臂（同 retune_waypoint.py 的 max-joint-diff 保护）。
+    """
+    start = None
+    if steps > 1 and robot.pose is not None:
+        start = np.asarray(robot.pose[0], float)
+    if start is not None:
+        goal = np.asarray(position, float)
+        targets = [start + (goal - start) * (i / steps) for i in range(1, steps + 1)]
+    else:
+        targets = [position]
+
+    # ---- 阶段1：把所有段的关节解全部算出来并核对；此阶段一行都不动 ----
+    plan = []
+    prev = None
+    for idx, tgt in enumerate(targets, 1):
+        if prev is None:
+            extra, names = list(ik_seeds), list(seed_names)
+        else:
+            extra = [prev] + list(ik_seeds)
+            names = ['当前关节角', '上一段解'] + list(seed_names[1:])
+        joints, used = robot.ik_solve(tgt, euler, extra_seeds=extra)
+        if joints is None:
+            raise TaskError(
+                f'{where}：第 {idx}/{len(targets)} 段 '
+                f'{np.round(np.asarray(tgt) * 1000, 1)}mm 多种子逆解全部失败，'
+                f'已中止（臂未移动）。')
+        ref = prev if prev is not None else robot.joints
+        if ref is None:
+            raise TaskError(f'{where}：无当前关节反馈，无法核对换臂型幅度')
+        diff = float(np.degrees(np.abs(np.asarray(joints, float)
+                                       - np.asarray(ref, float))).max())
+        if diff > max_joint_diff_deg:
+            raise TaskError(
+                f'{where}：第 {idx}/{len(targets)} 段需要换臂型（最大单关节变化 '
+                f'{diff:.1f}° > {max_joint_diff_deg:.0f}°），拒绝抡臂，'
+                f'已中止（臂未移动）。')
+        seed_txt = names[used] if (used is not None and used < len(names)) else '?'
+        plan.append((joints, diff, seed_txt))
+        prev = joints
+
+    # ---- 阶段2：全部段都有解，才开始执行 ----
+    if len(plan) > 1:
+        print(f'    [{robot.arm}] {where}：{len(plan)} 段逆解与换臂型核对全部通过，'
+              f'开始执行')
+    for idx, (joints, diff, seed_txt) in enumerate(plan, 1):
+        tag = f'第 {idx}/{len(plan)} 段 ' if len(plan) > 1 else ''
+        print(f'    [{robot.arm}] {where} {tag}种子「{seed_txt}」，'
+              f'换臂型最大 {diff:.1f}°，用 MoveJ 执行')
+        robot.move_joint(joints, runner.cfg.speed, runner.cfg.acce,
+                         runner.cfg.move_timeout)
+
+
+def resolve_transit_z(robot, hover, eul_left, ik_seeds, seed_names, ideal_z, label,
+                      step=0.025, min_clear=0.05):
+    """中转平面高度自适应：从理想高度逐级下降，取第一个 IK 可解的高度。
+
+    理想高度是桌面 +250mm（横移时离桌面最远、最安全），但机械臂在
+    「离机身近 + 抬得高」这个角落会收折超限，固定高度可能不可达
+    （实测中螺母在 -190mm 被驱动拒绝）。下限是该螺母 hover 点上方
+    min_clear，保证横移时不会蹭到螺母（hover 本身已在螺母上方 hover_height）。
+
+    全程不可解时抛 TaskError —— 在运动前中止，绝不盲动。
+    返回 (裁剪后的 z, 说明文字)。
+    """
+    floor_z = hover[2] + min_clear
+    z = float(ideal_z)
+    tried = 0
+    while z >= floor_z - 1e-9:
+        ok, used = robot.ik_check(np.array([hover[0], hover[1], z]),
+                                  eul_left, extra_seeds=ik_seeds)
+        tried += 1
+        if ok:
+            if tried == 1:
+                return z, f'理想高度可达（种子：{seed_names[used]}）'
+            return z, (f'理想高度 {np.round(ideal_z * 1000, 1)}mm 不可达，'
+                       f'降 {tried - 1} 档到 {np.round(z * 1000, 1)}mm'
+                       f'（种子：{seed_names[used]}）')
+        z -= step
+    raise TaskError(
+        f'左臂对{SIZE_NAMES_CN[label]}螺母：中转平面自 '
+        f'{np.round(ideal_z * 1000, 1)}mm 逐级下降 {tried} 档（下限 '
+        f'{np.round(floor_z * 1000, 1)}mm = 该螺母 hover 上方 {min_clear * 1000:.0f}mm）'
+        f'逆解全部失败，无法安全横移，已在运动前中止。'
+        f'请检查该螺母的视觉位置/深度/外参，或 '
+        f'left.grasp_orientation_by_size.{label} 姿态。')
+
+
 def run_one_nut(cfg, runner, left, right, label, det, eul_left, R_BTC, t_BTC,
                 left_legs, apprs, places):
     pb_raw, pb, hover, down, lift = grasp_points(cfg, det, R_BTC, t_BTC)
@@ -565,33 +666,42 @@ def run_one_nut(cfg, runner, left, right, label, det, eul_left, R_BTC, t_BTC,
           f'{np.round(pb * 1000, 1)}mm（偏移 '
           f'{np.round(cfg.grasp_offset_for(label) * 1000, 1)}mm）')
     # 安全路径（对任意螺母位置/起始姿态都安全）：
-    #   1. MoveL 竖直上升到固定安全高度 transit_z（始终高于桌面 ~300mm）
-    #   2. MoveJP 水平移到 hover 正上方（z=transit_z，高度够不会扫桌）
+    #   1. MoveL 竖直上升到中转平面（高度自适应，见 resolve_transit_z）
+    #   2. MoveJP 水平移到 hover 正上方（z=中转高度，高度够不会扫桌）
     #   3. MoveL 竖直下降到 hover
     #   4. MoveL 竖直下探到 down
     #   5. MoveL 竖直抬起到 lift
     TABLE_Z = -0.44  # 桌面在 base_link 系的估计 z，实际值由深度+标定决定
-    TRANSIT_Z = TABLE_Z + 0.25  # 中转平面：桌面 +250mm，留足余量
+    TRANSIT_Z = TABLE_Z + 0.25  # 中转平面理想高度：桌面 +250mm
     if left.pose is None:
         left.wait_state()
+    _, ik_seeds, seed_names = ik_seed_bank(left_legs)
+    transit_z, transit_note = resolve_transit_z(
+        left, hover, eul_left, ik_seeds, seed_names, TRANSIT_Z, label)
+    print(f'  [左] 中转平面 {np.round(transit_z * 1000, 1)}mm —— {transit_note}')
     current_pos = left.pose[0]
     cur_z = current_pos[2]
     # 步骤1：先升到中转平面（如果当前更低的话）
-    if cur_z < TRANSIT_Z + 0.01:  # 当前低于中转平面 10mm 以上
-        rise_xyz = np.array([current_pos[0], current_pos[1], TRANSIT_Z])
+    if cur_z < transit_z + 0.01:  # 当前低于中转平面 10mm 以上
+        rise_xyz = np.array([current_pos[0], current_pos[1], transit_z])
         print(f'  [左] MoveL 竖直上升到中转平面 {np.round(rise_xyz * 1000, 1)}mm...')
         runner._goto_pose(left, rise_xyz, eul_left,
                           f'{SIZE_NAMES_CN[label]}螺母 上升到中转平面', linear=True)
         dwell(0.15, '上升到位')
-    # 步骤2：MoveJP 水平横移到 hover 正上方（z 保持 TRANSIT_Z）
-    transit_xyz = np.array([hover[0], hover[1], TRANSIT_Z])
+    # 步骤2：MoveJP 水平横移到 hover 正上方（z 保持中转高度）
+    transit_xyz = np.array([hover[0], hover[1], transit_z])
     print(f'  [左] MoveJP 水平横移到 {np.round(transit_xyz * 1000, 1)}mm（中转平面横移）...')
-    runner._goto_pose(left, transit_xyz, eul_left, f'{SIZE_NAMES_CN[label]}螺母 中转平面横移')
+    move_via_ik(runner, left, transit_xyz, eul_left, ik_seeds, seed_names,
+                f'{SIZE_NAMES_CN[label]}螺母 中转平面横移')
     dwell(0.15, '横移到位')
-    # 步骤3：MoveL 下降到 hover
-    print(f'  [左] MoveL 到螺母正上方 hover {np.round(hover * 1000, 1)}mm（竖直下降）...')
-    runner._goto_pose(left, hover, eul_left, f'{SIZE_NAMES_CN[label]}螺母 hover 悬停',
-                      linear=True)
+    # 步骤3：下降到 hover —— 同样走「外部 IK + MoveJ」，绕开 SDK 的 MoveL 规划器。
+    # 每 25mm 分一段逐段 IK，路径贴近竖直直线；段数按实际落差算。
+    drop = abs(float(hover[2]) - float(transit_z))
+    desc_steps = max(2, int(round(drop / 0.025)))
+    print(f'  [左] 下降到螺母正上方 hover {np.round(hover * 1000, 1)}mm'
+          f'（竖直 {np.round(drop * 1000, 1)}mm，分 {desc_steps} 段，外部 IK + MoveJ）...')
+    move_via_ik(runner, left, hover, eul_left, ik_seeds, seed_names,
+                f'{SIZE_NAMES_CN[label]}螺母 hover 悬停', steps=desc_steps)
     dwell(cfg.hover_dwell_seconds, '悬停确认，准备下探')
     if getattr(cfg, 'stop_at_hover', False):
         d = hover - pb_raw
@@ -600,21 +710,34 @@ def run_one_nut(cfg, runner, left, right, label, det, eul_left, R_BTC, t_BTC,
               f'{np.round(hover * 1000, 1)}mm，偏离检测点 {np.round(d * 1000, 1)}mm')
         print('    请现场核对指尖与螺母的实际偏差后按 Ctrl-C 退出（臂保持不动）。')
         return 'hover_stop'
-    # 步骤4：MoveL 下探到 down
-    print(f'  [左] MoveL 竖直下探 {np.round(down * 1000, 1)}mm...')
-    runner._goto_pose(left, down, eul_left, f'{SIZE_NAMES_CN[label]}螺母 down 下探',
-                      linear=True)
+    # 步骤4：下探到 down —— 同步骤3，外部 IK + MoveJ 分段贴竖直直线
+    drop2 = abs(float(down[2]) - float(hover[2]))
+    down_steps = max(2, int(round(drop2 / 0.025)))
+    print(f'  [左] 竖直下探到 down {np.round(down * 1000, 1)}mm'
+          f'（{np.round(drop2 * 1000, 1)}mm，分 {down_steps} 段，外部 IK + MoveJ）...')
+    move_via_ik(runner, left, down, eul_left, ik_seeds, seed_names,
+                f'{SIZE_NAMES_CN[label]}螺母 down 下探', steps=down_steps)
     dwell(cfg.pre_hand_seconds, '闭合前')
     close_vals = cfg.close_for('left', label)
     print(f'  [左] 闭合手 {close_vals}，静置 {cfg.settle_seconds:.1f}s')
     left.hand_close(close_vals, settle=cfg.settle_seconds)
     dwell(cfg.pre_hand_seconds, '抓稳后抬起')
-    # 步骤5：MoveL 竖直抬起到 lift
-    print(f'  [左] MoveL 从抓取点竖直上抬 {lift_mm:.0f}mm '
-          f'到 {np.round(lift * 1000, 1)}mm（先脱离桌面再做其他动作）...')
-    runner._goto_pose(left, lift, eul_left, f'{SIZE_NAMES_CN[label]}螺母抓后竖直上抬',
-                      linear=True)
+    # 步骤5：竖直抬起到 lift —— 同样外部 IK + MoveJ（先脱离桌面再做其他动作）
+    rise2 = abs(float(lift[2]) - float(down[2]))
+    lift_steps = max(2, int(round(rise2 / 0.025)))
+    print(f'  [左] 从抓取点竖直上抬 {lift_mm:.0f}mm 到 {np.round(lift * 1000, 1)}mm'
+          f'（分 {lift_steps} 段，外部 IK + MoveJ；先脱离桌面再做其他动作）...')
+    move_via_ik(runner, left, lift, eul_left, ik_seeds, seed_names,
+                f'{SIZE_NAMES_CN[label]}螺母抓后竖直上抬', steps=lift_steps)
     dwell(cfg.between_leg_seconds, '进入固定段')
+
+    if getattr(cfg, 'stop_after_lift', False):
+        print(f'  [--stop-after-lift] 已抓起{SIZE_NAMES_CN[label]}螺母并竖直上抬到 '
+              f'{np.round(lift * 1000, 1)}mm，不回放固定段、不做双臂交接。')
+        print(f'    左臂闭手值 {cfg.close_for("left", label)}；请现场确认螺母是否随臂抬起、'
+              f'是否抓稳（不掉、不歪、不蹭桌）。')
+        print('    确认后按 Ctrl-C 退出（臂保持当前姿态）。')
+        return 'lift_stop'
 
     for leg in left_legs:
         print(f'  [左] 回放段 {leg.target}')
@@ -699,7 +822,7 @@ def ik_seed_bank(left_legs):
     seed_leg = left_legs[0]
     seeds = [seed_leg.joints[0], seed_leg.joints[-1]]
     names = ['当前关节角', f'{seed_leg.target} pt0（记录臂型）',
-             f'{seed_leg.target} 末点（记录臂型）', '空种子（驱动自读当前角）']
+             f'{seed_leg.target} 末点（记录臂型）']
     return seed_leg, seeds, names
 
 
@@ -783,7 +906,7 @@ def execute(cfg, store, R_BTC, t_BTC, K, left_legs, apprs, places, release_leg,
         detections, by_label = detect_until_complete(
             cfg, lambda: detector.detect(cfg.order))
         print(f'检测到 {len(detections)} 颗：'
-              f'{", ".join(SIZE_NAMES_CN[d.label] for d in detections)}')
+              f'{", ".join(SIZE_NAMES_CN.get(d.label, d.label) for d in detections)}')
 
         print('视觉抓取姿态（按尺寸）：')
         for k in cfg.order:
@@ -830,7 +953,7 @@ def execute(cfg, store, R_BTC, t_BTC, K, left_legs, apprs, places, release_leg,
                     what=f'{SIZE_NAMES_CN[label]}螺母抓取前重识别',
                     labels=labels_now)
                 print(f'重识别看到 {len(fresh)} 个目标：'
-                      + (', '.join(SIZE_NAMES_CN[d.label] for d in fresh) if fresh
+                      + (', '.join(SIZE_NAMES_CN.get(d.label, d.label) for d in fresh) if fresh
                          else '（无）'))
                 if label not in chosen:
                     raise TaskError(
@@ -844,9 +967,14 @@ def execute(cfg, store, R_BTC, t_BTC, K, left_legs, apprs, places, release_leg,
                     handle_ik_failure(cfg, left, seed_leg, seed_names, fail)
                 else:
                     print(f'  {SIZE_NAMES_CN[label]}螺母新鲜视觉点 IK 复检通过。')
-            if run_one_nut(cfg, runner, left, right, label, det, grasp_poses[label][0],
-                           R_BTC, t_BTC, left_legs, apprs, places) == 'hover_stop':
+            stop = run_one_nut(cfg, runner, left, right, label, det,
+                               grasp_poses[label][0],
+                               R_BTC, t_BTC, left_legs, apprs, places)
+            if stop == 'hover_stop':
                 print('已按 --stop-at-hover 停在 hover，退出（左臂保持当前姿态）。')
+                return
+            if stop == 'lift_stop':
+                print('已按 --stop-after-lift 抓起并上抬后退出（左臂保持当前姿态）。')
                 return
             if idx < len(remaining) - 1:
                 print(f'  螺母之间停顿 {cfg.between_leg_seconds:.1f}s，'
@@ -884,6 +1012,9 @@ def main():
     p.add_argument('--stop-at-hover', action='store_true',
                    help='真机只走到第一颗螺母正上方 hover 悬停位就停下（不下探/不闭合/不回放段），'
                         '用于现场核对视觉识别点到准备抓取位之间的偏差')
+    p.add_argument('--stop-after-lift', action='store_true',
+                   help='真机走到【闭合抓取 + 竖直上抬】就停下（不回放固定段、不做双臂交接），'
+                        '用于单独验证左臂抓得稳不稳')
     p.add_argument('--show', action='store_true',
                    help='YOLO 识别时弹窗实时显示画面/检测框（即使 yaml detector.show_window=false）')
     args = p.parse_args()
@@ -894,6 +1025,7 @@ def main():
             detector_override=args.detector, speed_scale=args.speed)
         cfg.allow_ik_fail = bool(args.allow_ik_fail)
         cfg.stop_at_hover = bool(args.stop_at_hover)
+        cfg.stop_after_lift = bool(args.stop_after_lift)
         if args.show:
             cfg.detector_raw['show_window'] = True
         if args.speed != 1.0:

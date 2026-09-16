@@ -4,3 +4,8 @@ log/
 __pycache__/
 *.pyc
 .venv-yolo/
+
+# 现场调参时自动产生的文件备份（tools/、recordings/、开发资源/ 下都有）
+*.bak_*
+# capture_nut_images.py 的默认采图输出目录
+captures/

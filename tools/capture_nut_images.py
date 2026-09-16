@@ -12,6 +12,8 @@ from pathlib import Path
 import sys
 import time
 
+WORKSPACE = Path(__file__).resolve().parents[1]  # 工作区根；默认输出基于它，与电脑无关
+
 
 def positive(text):
     value = float(text)
@@ -37,7 +39,8 @@ def save_frame(directory, frame, stamp, topic, index):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--output', type=Path, default=Path('/home/dawntildusk/nut_vision'))
+    parser.add_argument('--output', type=Path, default=WORKSPACE / 'captures',
+                        help='采集根目录（默认工作区内 captures/，可用 --output 覆盖）')
     parser.add_argument('--color-topic', default='/camera/color/image_raw')
     parser.add_argument('--interval', type=positive, help='自动拍照间隔秒数；不传则手动')
     parser.add_argument('--max-age', type=positive, default=1., help='允许的接收帧龄（秒）')

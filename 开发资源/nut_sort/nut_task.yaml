@@ -100,9 +100,9 @@ motion:
   #                 接近段上抬、抓后回 hover 下杵桌面，加载配置即报错）
   #   lift_height = 抓稳后相对下探终点竖直上抬多高再回放固定段（缺省用上面的 0.05）
   grasp_by_size:
-    l: {offset_xyz: [-0.01, -0.06, 0.0], z_offset: 0.09, hover_height: 0.12}
-    m: {offset_xyz: [-0.022, -0.073, 0.0], z_offset: 0.08, hover_height: 0.12}
-    s: {offset_xyz: [-0.004, -0.035, 0.0], z_offset: 0.07, hover_height: 0.12}
+    l: {offset_xyz: [-0.01, -0.03, 0.0], z_offset: 0.09, hover_height: 0.12}
+    m: {offset_xyz: [-0.022, -0.053, 0.0], z_offset: 0.08, hover_height: 0.12}
+    s: {offset_xyz: [-0.029, -0.035, 0.0], z_offset: 0.072, hover_height: 0.12}
 
   # 序列段：逐点 MoveJ
   join_speed: 0.3          # 接入序列起点 / retreat 回 home 的慢速 MoveJ
@@ -135,12 +135,12 @@ motion:
   pose_ori_tolerance: 0.05 # 末端姿态容差 rad（≈2.9°）
   other_tolerance: 0.05     # 回放中另一只臂漂移上限
 
-# ---- 灵巧手（6 路：[拇指侧摆,拇指弯曲,食,中,无名,小]，0~255）----
+# ---- 灵巧手（6 路：[拇指弯曲,拇指侧摆,食,中,无名,小]，0~255；255=全张 0=全闭）----
 hand:
   speed: [80, 80, 80, 80, 80, 80]
   force: [100, 100, 100, 100, 100, 100]
-  # 张开手型（2026-09-10 现场给定）：[拇指侧摆,拇指弯曲,食,中,无名,小]
-  open: [200, 80, 255, 255, 255, 255]
+  # 张开手型（2026-09-10 现场给定）：[拇指弯曲,拇指侧摆,食,中,无名,小]
+  open: [185, 80, 255, 255, 255, 255]
   # 各臂闭合默认值（2026-09-10 现场给定，三颗螺母先共用；当晚小拇指也改为闭合 0，原 255 为张开）
   close:
     left:  [0, 0, 0, 0, 0, 0]
@@ -150,6 +150,10 @@ hand:
   #   l: {joint: [180, 180, 180, 180, 180, 180]}          # 双臂共用
   #   m: {left: [0,60,0,0,0,255], right: [0,100,0,0,0,255]}  # 分臂
   #   s: {joint: [120, 120, 120, 120, 120, 120]}
+  # 小螺母专用手型（2026-09-16 现场调试）：四指弯曲 40；拇指弯曲/侧摆暂保持 0。
+  # 只写 left：右臂抓 s 仍用 close.right 默认值（交接尚未调试）。
+  sizes:
+    s: {left: [0, 0, 40, 40, 40, 40]}
 
 # ---- 视觉话题与标定 ----
 vision:
@@ -170,7 +174,7 @@ vision:
 detector:
   type: manual
   # 主流程 --detector yolo 启用；模型路径相对工作区。
-  model: weights/nut_best.pt
+  model: weights/nut_white_best.pt
   # auto 优先工作区 .venv-yolo，其次 ~/miniconda3/envs/nut-yolo；也可指定解释器路径。
   # 推理子进程与 ROS Python 隔离。
   python: auto
@@ -207,4 +211,6 @@ detector:
   # 同型号多目标（如画面里两颗中螺母/两颗小螺母）：
   #   random=随机抓一颗继续（当前选用）；first=取检测结果第一颗；abort=中止（缺省安全行为）
   duplicate_policy: random
-  external: '/home/ran/lbot_ws/开发资源/nut_sort/nut_vision_detector.py:NutVisionDetector'
+  # 格式 '文件路径或模块:类名'；相对路径按【工作区根目录】解析。
+  # 指向仓库自带的示例检测器；换自己的工作区/自己的检测器时改这里。
+  external: '开发资源/nut_sort/nut_vision_detector.py:NutVisionDetector'

@@ -416,7 +416,10 @@ def load_external_detector(spec, node, sub_cfg, K):
     if mod_part.endswith('.py'):
         mod_path = Path(mod_part)
         if not mod_path.is_absolute():
-            mod_path = Path.cwd() / mod_path
+            # 先按【工作区根目录】解析（仓库内相对路径与当前目录无关），
+            # 不存在再退回当前工作目录。换电脑 / 换 cwd 都不会失效。
+            ws_cand = Path(__file__).resolve().parents[1] / mod_path
+            mod_path = ws_cand if ws_cand.exists() else (Path.cwd() / mod_path)
         if not mod_path.exists():
             raise TaskError(f'外部检测器文件不存在 {mod_path}')
         import importlib.util

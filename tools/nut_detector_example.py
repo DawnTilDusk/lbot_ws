@@ -3,8 +3,9 @@
 
 接入：
   1. 把本文件拷到任意位置（建议 开发资源/nut_sort/ 下），改 detect() 内部实现；
-  2. nut_task.yaml 里 detector.type=external，detector.external 填绝对路径:类名，如
-       external: '/home/lionheart/.../nut_sort/my_detector.py:MyNutDetector'
+  2. nut_task.yaml 里 detector.type=external，detector.external 填 '文件路径或模块:类名'；
+     相对路径按【工作区根目录】解析（也可写绝对路径），例如
+       external: '开发资源/nut_sort/my_detector.py:MyNutDetector'
   3. --execute 时任务在【双臂回到 home、离开画面后】调用 detect(expected)。
 
 契约：
