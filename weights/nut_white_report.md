@@ -1,21 +1,17 @@
-# 四类别螺母训练结果
+# 新视角追加52轮训练
 
-从 `../nuts_mixed_20260914/weights/best.pt` 迁移微调，类别扩展为 large、medium、small、white。训练 71 张，验证 31 张，完成 100 轮。
+累计 100 轮；本段 52 轮。从上一轮 last.pt 新建优化器微调，lr0=0.0003，patience=0。
 
-最优权重：`nut_white_best.pt`；最后一轮：`weights/last.pt`。
+| 模型 | 验证 mAP50 | 验证 mAP50–95 |
+|---|---:|---:|
+| previous_best | 0.9950 | 0.8906 |
+| continued_best | 0.9950 | 0.8959 |
 
-| 类别 | Precision | Recall | mAP50 | mAP50–95 |
-|---|---:|---:|---:|---:|
-| 全部 | 0.995 | 1.000 | 0.995 | 0.941 |
-| large | 0.991 | 1.000 | 0.995 | 0.995 |
-| medium | 0.993 | 1.000 | 0.995 | 0.965 |
-| small | 0.997 | 1.000 | 0.995 | 0.965 |
-| white | 0.998 | 1.000 | 0.995 | 0.840 |
+按验证集推荐：continued_best
 
-以上为训练器对 best.pt 的最终验证输出，按终端精度记录。验证集与训练集场景相近，标注由模型辅助生成并复核，不能代表新环境性能。
+追加模型测试结果：{"metrics/precision(B)": 0.9871494662961894, "metrics/recall(B)": 0.99548732538643, "metrics/mAP50(B)": 0.995, "metrics/mAP50-95(B)": 0.8674446975850401, "fitness": 0.8674446975850401}
 
-预测预览：`val_batch0_pred.jpg`、`val_batch1_pred.jpg`。完整参数见 `args.yaml`，来源和哈希见 `nut_white_best.json`。
+同场景测试集已在上轮评估中使用，不能视为新的独立测试。145张待复核图片仍未参与。已同步到仓库 weights/nut_white_best.pt；旧四类模型已备份。三类抓取权重 nut_best.pt 保持原样。
 
-四类权重已同步为 nut_white_best.pt，nut_yolo_infer.py 与实时预览已支持 white。原三类 nut_best.pt 保留供抓取流程使用，白色螺母的机械臂业务尚未配置。
 
-完整训练产物来源：`/home/dawntildusk/nut_vision/runs/nuts_white4_20260914/`；文中未随权重提交的训练图表、参数及 last.pt 位于该目录。
+训练来源：/home/dawntildusk/nut_vision/runs/nuts_newview_continue52_20260916

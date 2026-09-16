@@ -1,26 +1,43 @@
 {
-  "parent_weights": "/home/dawntildusk/nut_vision/runs/nuts_mixed_20260914/weights/best.pt",
-  "parent_sha256": "e3cef593ccc4342e6b5adf0af281e50971187e081a5247ff77c82886903c62a0",
-  "best_weights": "/home/dawntildusk/nut_vision/runs/nuts_white4_20260914/weights/best.pt",
-  "best_sha256": "b421092791338c577b703eeda876237fcabe7428d21480542d17989c8e144c91",
-  "dataset": "/home/dawntildusk/nut_vision/datasets/whiteandblack_4class_20260914/data.yaml",
-  "manifest_sha256": "adaa133cbc801c910aa2d844f722eb6cdf8308276d6ac75efaf6e3cf62ef9752",
-  "epochs_completed": 100,
-  "train_images": 71,
-  "val_images": 31,
+  "source": "/home/dawntildusk/nut_vision/runs/nuts_newview_continue52_20260916/weights/best.pt",
+  "sha256": "b8d6fff7f60c41a797201c249d1966b57a9f2625657e6ee21927a37ab66ffb5c",
+  "repository_weights": "weights/nut_white_best.pt",
   "classes": {
     "0": "large",
     "1": "medium",
     "2": "small",
     "3": "white"
   },
-  "final_best_validation_rounded": {
-    "precision": 0.995,
-    "recall": 1.0,
-    "mAP50": 0.995,
-    "mAP50_95": 0.941,
-    "white_mAP50_95": 0.84
+  "epochs_completed": 100,
+  "training_stages": [
+    48,
+    52
+  ],
+  "train_images": 381,
+  "val_images": 57,
+  "test_images": 38,
+  "dataset": "/home/dawntildusk/nut_vision/datasets/nuts_newview_4class_20260916/data.yaml",
+  "validation": {
+    "metrics/precision(B)": 0.9961337409698077,
+    "metrics/recall(B)": 1.0,
+    "metrics/mAP50(B)": 0.995,
+    "metrics/mAP50-95(B)": 0.895936393700017,
+    "fitness": 0.895936393700017
   },
-  "limitations": "Same-scene validation; model-assisted annotations. Not an independent capture-session test. Default robot weights unchanged.",
-  "repository_weights": "weights/nut_white_best.pt"
+  "test": {
+    "metrics/precision(B)": 0.9871494662961894,
+    "metrics/recall(B)": 0.99548732538643,
+    "metrics/mAP50(B)": 0.995,
+    "metrics/mAP50-95(B)": 0.8674446975850401,
+    "fitness": 0.8674446975850401
+  },
+  "test_per_class_mAP50_95": {
+    "large": 0.9467647058823531,
+    "medium": 0.976037037037037,
+    "small": 0.9792517726954957,
+    "white": 0.5677252747252748
+  },
+  "backup": "weights/backups/white_before_newview_20260916_084859",
+  "updated_at": "2026-09-16T08:48:59.215126+08:00",
+  "note": "Selected by validation. Same-scene test set reused; 145 pending images excluded. Three-class robot weights remain unchanged."
 }

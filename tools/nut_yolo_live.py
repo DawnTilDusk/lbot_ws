@@ -46,7 +46,7 @@ class Worker:
         env['PYTHONNOUSERSITE'] = '1'
         self.timeout = float(cfg.get('inference_timeout',30))
         self.process = subprocess.Popen([str(python),str(WORKSPACE/'tools/nut_yolo_infer.py'),
-            '--serve','--model',str(model),'--device',str(cfg.get('device','cpu')),
+            '--serve','--allow-pose','--model',str(model),'--device',str(cfg.get('device','cpu')),
             '--conf',str(cfg.get('confidence',.5)),'--imgsz',str(cfg.get('imgsz',640))],
             stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=self.log,text=True,env=env,bufsize=1)
 
@@ -86,6 +86,10 @@ def coordinates(records, pair, info, R, t, ext, cfg):
         error='外参坐标系不匹配'
     for record in records:
         row=dict(record)
+        if row.get('task') == 'pose':
+            row['coordinate_mode'] = 'pixel_only'
+            rows.append(row)
+            continue
         try:
             if error: raise TaskError(error)
             det=locate([record],d[2],info['K'],c[2].shape,cfg)
@@ -113,21 +117,40 @@ def preview_result(result, now, fresh, age_limit, result_limit):
 def render(frame, rows, status, font):
     canvas=frame.copy()
     for r in rows:
-        x1,y1,x2,y2=map(round,r['bbox']);u,v=round(r['u']),round(r['v'])
+        x1,y1,x2,y2=map(round,r['bbox'])
         cv2.rectangle(canvas,(x1,y1),(x2,y2),(0,255,0),2)
-        cv2.drawMarker(canvas,(u,v),(0,0,255),cv2.MARKER_CROSS,18,2)
+        if r.get('task') == 'pose':
+            points = r['keypoints']
+            if all(k['valid'] for k in points):
+                cv2.line(canvas, tuple(round(points[0][a]) for a in ('u','v')),
+                         tuple(round(points[1][a]) for a in ('u','v')), (0,255,255), 2)
+            for k in points:
+                if not k['valid']: continue
+                pt = (round(k['u']), round(k['v']))
+                color = (0,0,255) if k['name']=='tip' else (0,255,0)
+                cv2.drawMarker(canvas,pt,color,cv2.MARKER_CROSS,14,2)
+                cv2.putText(canvas,k['name'],(pt[0]+8,pt[1]-5),0,.55,color,2)
+        else:
+            cv2.drawMarker(canvas,(round(r['u']),round(r['v'])),(0,0,255),cv2.MARKER_CROSS,18,2)
     panel=np.zeros((max(canvas.shape[0],100+len(rows)*115),580,3),np.uint8)
     full=np.zeros((panel.shape[0],canvas.shape[1]+580,3),np.uint8)
     full[:canvas.shape[0],:canvas.shape[1]]=canvas
     image=PILImage.fromarray(cv2.cvtColor(full,cv2.COLOR_BGR2RGB));draw=ImageDraw.Draw(image)
     x=canvas.shape[1]+12
-    draw.text((x,10),'只读实时检测 | 坐标单位：米',font=font,fill='white')
+    draw.text((x,10),'只读检测 | 像素 uv / 三维坐标 m',font=font,fill='white')
     draw.text((x,42),status,font=font,fill='yellow')
-    names={'l':'大','m':'中','s':'小','white':'白色'}
+    names={'l':'大','m':'中','s':'小','white':'白色','needle':'铁杆'}
     for i,r in enumerate(rows):
         y=90+i*115
         draw.text((max(0,round(r['bbox'][0])),max(0,round(r['bbox'][1])-28)),
                   f'{names[r["label"]]} {r["confidence"]:.2f}',font=font,fill='yellow')
+        if r.get('task') == 'pose':
+            draw.text((x,y),f'铁杆 置信度 {r["confidence"]:.2f} | 二维关键点',font=font,fill='white')
+            for j,k in enumerate(r['keypoints']):
+                text = f'{k["name"]}: ({k["u"]:.1f}, {k["v"]:.1f}) px' if k['valid'] else f'{k["name"]}: 低置信度或越界，已隐藏'
+                draw.text((x,y+28+j*26),text,font=font,fill='cyan')
+            draw.text((x,y+80),r.get('error','细杆深度未经验证，不输出 XYZ'),font=font,fill='orange')
+            continue
         draw.text((x,y),f'{names[r["label"]]} 置信度 {r["confidence"]:.2f}  中心 ({r["u"]:.1f}, {r["v"]:.1f})',font=font,fill='white')
         if 'p_cam' in r:
             for offset,key,label in [(30,'p_cam','相机'),(60,'p_base','基座')]:
@@ -139,10 +162,11 @@ def render(frame, rows, status, font):
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--config',type=Path,default=DEFAULT_CONFIG)
-    p.add_argument('--model',type=Path,help='预览模型路径，可使用大/中/小/white 四类权重')
+    p.add_argument('--model',type=Path,help='螺母 Detection 或 needle 两关键点 Pose 权重，自动识别任务')
     p.add_argument('--device',default='auto',help='auto 自动选择 GPU（默认）、cpu 或 0')
     p.add_argument('--inference-timeout',type=float,default=60,help='单次推理超时秒数，超时自动重启推理进程')
     p.add_argument('--conf',type=float)
+    p.add_argument('--imgsz',type=int,default=0,help='0 自动选择：螺母640，铁杆960；正数覆盖')
     p.add_argument('--scale',type=float,default=.75)
     p.add_argument('--no-preview',action='store_true',help='无窗口测试，配合 --duration')
     p.add_argument('--duration',type=float,default=0,help='运行秒数，0 不限')
@@ -152,11 +176,13 @@ def main():
     if not np.isfinite([args.scale,args.duration]).all() or args.scale<=0 or args.duration<0: p.error('scale 必须为正，duration 非负')
     if args.conf is not None and not 0<args.conf<=1: p.error('conf 必须在 (0,1]')
     if not np.isfinite(args.inference_timeout) or args.inference_timeout<=0: p.error('inference-timeout 必须为正')
+    if args.imgsz < 0: p.error('imgsz 必须非负')
     cfg=TaskConfig(args.config); options=dict(cfg.detector_raw)
     if args.model is not None: options['model']=str(args.model)
     if args.device is not None: options['device']=args.device
     if args.conf is not None: options['confidence']=args.conf
     options['inference_timeout']=args.inference_timeout
+    options['imgsz']=args.imgsz
     R,t,ext=load_extrinsics(cfg.extrinsics_path)
     font=ImageFont.truetype(args.font,22)
     import rclpy

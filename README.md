@@ -1,5 +1,7 @@
 # LBot ROS2 SDK 资料总览
 
+本机相机启动、实时预览、采图及模型训练命令见 [视觉模块指令手册](视觉模块指令手册.md)。
+
 ## 螺母视觉与双臂抓放
 
 当前工作区提供采图、YOLO 大中小螺母检测、中心定位、深度坐标转换和双臂抓放接入。
@@ -45,6 +47,16 @@ source /opt/ros/jazzy/setup.zsh
 /usr/bin/python3 tools/nut_yolo_live.py --device 0 \
   --model weights/nut_white_best.pt
 ```
+
+铁杆关键点使用同一入口，只更换模型：
+
+```zsh
+/usr/bin/python3 tools/nut_yolo_live.py --device 0 --conf 0.5 \
+  --model weights/needle_pose_best.pt
+```
+
+自动使用 Pose 960 输入（螺母为 640）；显示 tip/base 像素坐标，铁杆暂不输出 XYZ。
+相机仍需发布同步彩色、深度和内参。按 `s` 保存的 JSON 包含 `keypoints`。
 
 窗口左侧显示大/中/小检测框（四类模型还显示白色）和中心十字，右侧显示置信度、像素中心、相机 XYZ 和
 机器人 `base_link` XYZ（米）。模型常驻后台，仅处理最新配对帧。

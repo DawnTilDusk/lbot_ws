@@ -2,6 +2,7 @@
 """Conda 推理子进程：原始彩色 PNG -> 原图坐标框和中心 JSON，不加载 ROS。"""
 import argparse
 import json
+import math
 import sys
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -16,6 +17,7 @@ def main():
     p.add_argument('--conf', type=float, default=.5)
     p.add_argument('--imgsz', type=int, default=640)
     p.add_argument('--device', default='cpu')
+    p.add_argument('--allow-pose', action='store_true', help='实时预览允许 needle 两关键点模型')
     args = p.parse_args()
     import torch
     if args.device == 'auto':
@@ -25,8 +27,9 @@ def main():
     with redirect_stdout(sys.stderr):
         model = YOLO(args.model)
     mapping = {'large': 'l', 'medium': 'm', 'small': 's', 'white': 'white'}
-    if set(model.names.values()) not in ({'large', 'medium', 'small'}, set(mapping)):
-        raise ValueError(f'模型类别不匹配：{model.names}')
+    validate_model(model, args.allow_pose)
+    if args.imgsz == 0:
+        args.imgsz = 960 if model.task == 'pose' else 640
     if args.serve:
         for line in sys.stdin:
             try:
@@ -43,6 +46,28 @@ def main():
     Path(args.output).write_text(json.dumps(records, allow_nan=False), encoding='utf-8')
 
 
+def validate_model(model, allow_pose=False):
+    if model.task == 'pose':
+        shape = list(model.model.model[-1].kpt_shape)
+        if not allow_pose or model.names != {0: 'needle'} or shape != [2, 3]:
+            raise ValueError('只读预览仅支持 needle 的 tip/base 两关键点 Pose 模型')
+    elif model.task != 'detect' or set(model.names.values()) not in (
+            {'large', 'medium', 'small'}, {'large', 'medium', 'small', 'white'}):
+        raise ValueError(f'模型类别或任务不匹配：{model.task} {model.names}')
+
+
+def pose_keypoints(points, width, height, threshold):
+    records = []
+    for name, (u, v, confidence) in zip(('tip', 'base'), points):
+        valid = (all(math.isfinite(float(x)) for x in (u, v, confidence))
+                 and confidence >= threshold and 0 <= u < width and 0 <= v < height
+                 and (u != 0 or v != 0))
+        records.append(dict(name=name, u=float(u) if valid else None,
+                            v=float(v) if valid else None, valid=bool(valid),
+                            confidence=float(confidence) if math.isfinite(float(confidence)) else 0.))
+    return records
+
+
 def predict(model, image, args, mapping):
     if str(image).endswith('.npy'):
         import numpy as np
@@ -50,11 +75,17 @@ def predict(model, image, args, mapping):
     result = model.predict(image, conf=args.conf, imgsz=args.imgsz,
                            device=args.device, verbose=False)[0]
     records = []
-    for box in result.boxes:
+    for index, box in enumerate(result.boxes):
         x1, y1, x2, y2 = box.xyxy[0].tolist()
-        records.append(dict(label=mapping[result.names[int(box.cls.item())]],
-                            confidence=float(box.conf.item()), bbox=[x1, y1, x2, y2],
-                            u=(x1+x2)/2, v=(y1+y2)/2))
+        if model.task == 'pose':
+            h, w = result.orig_shape
+            points = pose_keypoints(result.keypoints.data[index].cpu().tolist(), w, h, args.conf)
+            records.append(dict(label='needle', task='pose', confidence=float(box.conf.item()),
+                                bbox=[x1, y1, x2, y2], keypoints=points))
+        else:
+            records.append(dict(label=mapping[result.names[int(box.cls.item())]],
+                                confidence=float(box.conf.item()), bbox=[x1, y1, x2, y2],
+                                u=(x1+x2)/2, v=(y1+y2)/2))
     return records
 
 
