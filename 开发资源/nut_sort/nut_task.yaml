@@ -21,7 +21,7 @@ arm: right                 # 只给 capture_task_pose 选默认臂用；任务�
 
 # 抓取顺序选项：l=大 m=中 s=小；任意排列，如 [l,m,s] / [s,m,l] / [m,l,s]
 order: [l, m, s]
-require_all: true          # true=缺一颗中止；false=只抓检测到的
+require_all: false          # true=缺一颗中止；false=只抓检测到的
 
 check_other_arm: true      # 序列加载/回放时校验另一只臂静止（录制时另一只臂必须停着）
 
@@ -46,7 +46,7 @@ left:
   trace: recordings/left_grasp_middle/events.jsonl
   # 开机 ready 段：上使能+张手后逐点 MoveJ 回放，末点=视觉检测时停住的离场 ready 位。
   # 改 ready 姿态就重录一条序列并改这里的 file/sequence（不允许配 hand_after）。
-  ready: {file: recordings/left_trace2/events.jsonl, sequence: left_ready2_001}
+  ready: {file: recordings/20260915_175547_556799/events.jsonl, sequence: left-ready_001}
   legs:                      # 视觉抓起后【依次】回放；段尾手动作由框架发
     - {file: recordings/left_grasp_middle1/events.jsonl, sequence: left_middle_grasp_001, hand_after: open}
     - {file: recordings/left_middle_back/events.jsonl, sequence: left_middle_back_001}
@@ -57,7 +57,7 @@ left:
 right:
   trace: recordings/right_grasp_middle/events.jsonl
   # 开机 ready 段（同左臂）：right_trace 里的 right_ready1_001，末点离场
-  ready: {file: recordings/right_trace/events.jsonl, sequence: right_ready1_001}
+  ready: {file: recordings/20260915_134046_684005/events.jsonl, sequence: right-ready_001}
   # 中央重抓段：home -> 桌面中央，段尾 CLOSE 重抓。
   # 单段写法=三颗共用（当前）。中小螺母拇指高度不够时改按尺寸三选一：
   #   先 cp -r recordings/right_middle_grasp1 recordings/right_middle_grasp1_ms，
@@ -100,14 +100,15 @@ motion:
   #                 接近段上抬、抓后回 hover 下杵桌面，加载配置即报错）
   #   lift_height = 抓稳后相对下探终点竖直上抬多高再回放固定段（缺省用上面的 0.05）
   grasp_by_size:
-    l: {offset_xyz: [-0.07, 0.02, 0.0], z_offset: 0.09, hover_height: 0.12}
-    m: {offset_xyz: [-0.08, 0.02, 0.0], z_offset: 0.08, hover_height: 0.12}
-    s: {offset_xyz: [-0.08, 0.03, 0.0], z_offset: 0.08, hover_height: 0.12}
+    l: {offset_xyz: [-0.01, -0.06, 0.0], z_offset: 0.09, hover_height: 0.12}
+    m: {offset_xyz: [-0.022, -0.073, 0.0], z_offset: 0.08, hover_height: 0.12}
+    s: {offset_xyz: [-0.004, -0.035, 0.0], z_offset: 0.07, hover_height: 0.12}
 
   # 序列段：逐点 MoveJ
-  join_speed: 0.15          # 接入序列起点 / retreat 回 home 的慢速 MoveJ
-  join_acce: 0.15
-  sequence_speed: 0.3       # 序列逐点速度（record 回放惯例 <=0.5）
+  join_speed: 0.3          # 接入序列起点 / retreat 回 home 的慢速 MoveJ
+  join_acce: 0.3
+  join_seg_threshold: 0.8   # 分段插值阈值 rad/段（>0.8 才插）
+  sequence_speed: 0.5       # 序列逐点速度（record 回放惯例 <=0.5）
   sequence_acce: 0.5
   state_timeout: 0.5        # 反馈过期判定 s
 
@@ -124,7 +125,8 @@ motion:
 
   # 回放安全容差（沿用 replay_workpoints 的量级）
   start_tolerance: 0.05     # 与段起点偏差 <= 此值不补动
-  reached_tolerance: 0.03   # 到位关节容差（左臂/默认）
+  reached_tolerance: 0.03   # 到位关节容差（默认）
+  reached_tolerance_left: 0.1   # 左臂 ready 接入 pt0 时 Wrist_Roll 稳态停在 ~0.081rad（4.7°），重发无效，单独放宽
   reached_tolerance_right: 0.05  # 右臂持螺母伸展姿态肩滚转稳态停在 ~0.033rad（1.9°），重发无效，单独放宽≈2.9°
   reached_wait_seconds: 3.0 # 服务完成后等反馈进入容差的最长时间（伺服收敛/下沉有滞后，>=0.5）
   reached_reissue_count: 2 # 未到位时同目标指令最多补发次数（0=不补发直接中止；稳态残差请调容差而非加次数）
@@ -169,9 +171,9 @@ detector:
   type: manual
   # 主流程 --detector yolo 启用；模型路径相对工作区。
   model: weights/nut_best.pt
-  # 推理子进程解释器（与 ROS 系统 Python 隔离）：使用已安装的 nut-yolo Conda 环境。
-  # 使用独立 venv 的机器可改为其解释器路径；子进程环境已剔除 PYTHONPATH/PYTHONHOME。
-  python: ~/miniconda3/envs/nut-yolo/bin/python
+  # auto 优先工作区 .venv-yolo，其次 ~/miniconda3/envs/nut-yolo；也可指定解释器路径。
+  # 推理子进程与 ROS Python 隔离。
+  python: auto
   confidence: 0.5
   imgsz: 640
   device: cpu
@@ -205,4 +207,4 @@ detector:
   # 同型号多目标（如画面里两颗中螺母/两颗小螺母）：
   #   random=随机抓一颗继续（当前选用）；first=取检测结果第一颗；abort=中止（缺省安全行为）
   duplicate_policy: random
-  external: '/home/lionheart/Project/1_Competition/THUEI/Build_ws/lbot_ws/开发资源/nut_sort/nut_vision_detector.py:NutVisionDetector'
+  external: '/home/ran/lbot_ws/开发资源/nut_sort/nut_vision_detector.py:NutVisionDetector'

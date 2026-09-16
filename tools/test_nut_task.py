@@ -106,7 +106,7 @@ class ConfigAndLegsTest(unittest.TestCase):
         self.assertEqual(cfg.namespace, '/robot1')
         self.assertEqual(cfg.order, ('l', 'm', 's'))
         self.assertEqual(cfg.left_grasp_pose_name, 'left_grasp_init')
-        self.assertTrue(cfg.require_all)
+        self.assertFalse(cfg.require_all)
 
     def test_leg_specs_parsed(self):
         self.assertEqual(len(self.cfg.left_legs), 2)
@@ -272,12 +272,12 @@ class ConfigAndLegsTest(unittest.TestCase):
             self._reload(lambda y: y['motion'].update(reached_wait_seconds=0.4))
 
     def test_per_arm_reached_tolerance(self):
-        # 夹具/缺省无分臂覆盖；真实 yaml 右臂 0.05、左臂 None（用全局 0.03）
+        # 夹具/缺省无分臂覆盖；真实 yaml 右臂 0.05、左臂 0.1
         bare = TaskConfig(self.yaml_path)
         self.assertIsNone(bare.reached_tolerance_left)
         self.assertIsNone(bare.reached_tolerance_right)
         real = TaskConfig(DEFAULT_CONFIG)
-        self.assertIsNone(real.reached_tolerance_left)
+        self.assertAlmostEqual(real.reached_tolerance_left, 0.1)
         self.assertAlmostEqual(real.reached_tolerance_right, 0.05)
         with self.assertRaises(TaskError):
             self._reload(lambda y: y['motion'].update(reached_tolerance_right=0.11))
@@ -361,14 +361,14 @@ class ConfigAndLegsTest(unittest.TestCase):
         cfg = TaskConfig(DEFAULT_CONFIG)
         self.assertIsNotNone(cfg.left_ready)
         self.assertIsNotNone(cfg.right_ready)
-        self.assertEqual(cfg.left_ready[0].parent.name, 'left_trace2')
-        self.assertEqual(cfg.left_ready[1], 'left_ready2_001')
+        self.assertEqual(cfg.left_ready[0].parent.name, '20260915_175547_556799')
+        self.assertEqual(cfg.left_ready[1], 'left-ready_001')
         self.assertIsNone(cfg.left_ready[2])
-        self.assertEqual(cfg.right_ready[0].parent.name, 'right_trace')
-        self.assertEqual(cfg.right_ready[1], 'right_ready1_001')
+        self.assertEqual(cfg.right_ready[0].parent.name, '20260915_134046_684005')
+        self.assertEqual(cfg.right_ready[1], 'right-ready_001')
         _, _, _, _, rl, rr = load_all_legs(cfg)
-        self.assertEqual(rl.target, 'left_ready2_001')
-        self.assertEqual(rr.target, 'right_ready1_001')
+        self.assertEqual(rl.target, 'left-ready_001')
+        self.assertEqual(rr.target, 'right-ready_001')
 
     def test_ready_hand_action_rejected(self):
         def m(y):

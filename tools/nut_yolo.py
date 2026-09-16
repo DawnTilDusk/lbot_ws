@@ -126,12 +126,26 @@ class DetectionWindow:
 
 
 
+def resolve_python(cfg):
+    """Auto supports the team's workspace venv and this machine's Conda env."""
+    configured = cfg.get('python', 'auto')
+    if configured != 'auto':
+        path = Path(configured).expanduser()
+        return path if path.is_absolute() else WORKSPACE / path
+    candidates = [WORKSPACE / '.venv-yolo/bin/python',
+                  Path.home() / 'miniconda3/envs/nut-yolo/bin/python']
+    for path in candidates:
+        if path.is_file() and os.access(path, os.X_OK):
+            return path
+    raise TaskError('未找到 YOLO Python；请在 detector.python 指定已安装 ultralytics 的解释器')
+
+
 def infer_pixels(image, cfg):
     import cv2
     model = Path(cfg.get('model', 'weights/nut_best.pt')).expanduser()
     if not model.is_absolute():
         model = WORKSPACE / model
-    python = Path(cfg.get('python', str(WORKSPACE / '.venv-yolo/bin/python'))).expanduser()
+    python = resolve_python(cfg)
     if not model.is_file() or not python.is_file():
         raise TaskError(f'找不到 YOLO 模型或解释器：{model}，{python}')
     with tempfile.TemporaryDirectory(prefix='nut_yolo_') as folder:

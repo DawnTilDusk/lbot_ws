@@ -140,9 +140,11 @@ class SequenceRunner:
         return '；'.join(f'{n} {d:.3f}rad/{np.degrees(d):.1f}°' for d, n in over[:3])
 
     def _goto_point(self, robot, q, where, speed=None, acce=None):
-        """下发一个 MoveJ 并核对反馈到位；服务完成但反馈超差时按
-        reached_reissue_count 补发同目标 MoveJ（伺服可能因重力下沉/收敛滞后
-        停在目标外，重复同目标指令会逐次收敛），次数用尽仍不到才中止。"""
+        """MoveJ 到目标关节角 q，核对反馈到位。"""
+        self._goto_point_core(robot, q, where, speed=speed, acce=acce)
+
+    def _goto_point_core(self, robot, q, where, speed=None, acce=None):
+        """单次 MoveJ + 到位核对 + 补发（无分段）。"""
         speed = self.cfg.sequence_speed if speed is None else speed
         acce = self.cfg.sequence_acce if acce is None else acce
         retries = int(getattr(self.cfg, 'reached_reissue_count', 2))
@@ -294,21 +296,29 @@ class SequenceRunner:
                 rclpy.spin_once(node, timeout_sec=min(0.05, remain))
 
     def join_to_start(self, leg, tag=''):
-        """慢速 MoveJ 接入段起点（偏差 <= start_tolerance 则不动）。"""
+        """慢速 MoveJ 接入段起点（偏差 <= start_tolerance 则不动）。
+        若臂已在段末点附近（上轮已跑完），则跳过整段。"""
         self.check_names(leg)
         robot = self.clients[leg.arm]
         q0 = leg.joints[0]
-        diff = robot.joint_diff(q0)
-        if diff is None:
+        diff0 = robot.joint_diff(q0)
+        if diff0 is None:
             raise TaskError(f'{leg.arm} 臂无关节反馈，无法接入 {leg.target}')
-        if diff <= self.cfg.start_tolerance:
-            print(f'    [{leg.arm}] 已在段 {leg.target} 起点（Δ={diff:.3f}），直接回放')
-            return
-        print(f'    [{leg.arm}] MoveJ 接入 {leg.target} 起点（最大关节差 {diff:.3f} rad，'
+        if diff0 <= self.cfg.start_tolerance:
+            print(f'    [{leg.arm}] 已在段 {leg.target} 起点（Δ={diff0:.3f}），直接回放')
+            return 0  # 从 pt0 开始
+        # 已在末点？跳过整段
+        q_last = leg.joints[-1]
+        diff_last = robot.joint_diff(q_last)
+        if diff_last is not None and diff_last <= self.cfg.start_tolerance:
+            print(f'    [{leg.arm}] 已在段 {leg.target} 末点（Δ={diff_last:.3f}），跳过整段')
+            return len(leg.joints) - 1  # 跳过所有点
+        print(f'    [{leg.arm}] MoveJ 接入 {leg.target} 起点（最大关节差 {diff0:.3f} rad，'
               f'速度 {self.cfg.join_speed}）{tag}')
         self._goto_point(robot, q0, f'接入 {leg.target} 起点',
                          speed=self.cfg.join_speed, acce=self.cfg.join_acce)
         self._dwell(self.cfg.point_dwell_seconds, '接入完成')
+        return 0
 
     def run_leg(self, leg, label=None):
         """join -> 逐点 MoveJ -> 段尾手动作 -> 可选 retreat。label 决定 close 用哪档手型。"""
@@ -317,7 +327,10 @@ class SequenceRunner:
         other = self._other(leg.arm)
 
         self.check_names(leg)
-        self.join_to_start(leg)
+        start_idx = self.join_to_start(leg)
+        if start_idx >= len(leg.joints) - 1:
+            # 已在末点，跳过整段回放（段尾手动作/retreat 仍执行）
+            print(f'    [{leg.arm}] {leg.target} 已到位，跳过逐点回放')
         self._dwell(cfg.between_leg_seconds, f'进入段 {leg.target}')
 
         other_ref = other.joints
@@ -325,7 +338,7 @@ class SequenceRunner:
             raise TaskError(f'{leg.arm} 回放 {leg.target} 时另一只臂无反馈，无法做干涉保护')
         other_ref = list(other_ref)
 
-        for i in range(1, len(leg.joints)):
+        for i in range(start_idx + 1, len(leg.joints)):
             q = leg.joints[i]
             if not robot.feedback_fresh(cfg.state_timeout):
                 raise TaskError(f'{leg.arm} 回放 {leg.target} 第{i}点前反馈过期/无效')

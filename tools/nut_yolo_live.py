@@ -17,7 +17,7 @@ import cv2
 import numpy as np
 from PIL import Image as PILImage, ImageDraw, ImageFont
 from nut_robot import TaskConfig, DEFAULT_CONFIG, TaskError
-from nut_yolo import WORKSPACE, locate
+from nut_yolo import WORKSPACE, locate, resolve_python
 from camera_pick_move import load_extrinsics
 
 
@@ -39,7 +39,7 @@ class Worker:
         self.log = (self.folder/'worker.log').open('w+')
         model = Path(cfg.get('model', 'weights/nut_best.pt')).expanduser()
         if not model.is_absolute(): model = WORKSPACE/model
-        python = Path(cfg.get('python','~/miniconda3/envs/nut-yolo/bin/python')).expanduser()
+        python = resolve_python(cfg)
         env = os.environ.copy()
         env.pop('PYTHONPATH', None)
         env.pop('PYTHONHOME', None)
