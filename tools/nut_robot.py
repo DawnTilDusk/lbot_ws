@@ -365,6 +365,74 @@ class TaskConfig:
                         'join_speed', 'join_acce', 'sequence_speed', 'sequence_acce'):
                 setattr(self, key, getattr(self, key) * self.speed_scale)
 
+        # ---- 安全回退（tools/nut_return.py：逆向 ready 轨迹回开机起始位）----
+        r = d('return', {}) or {}
+        if not isinstance(r, dict):
+            raise TaskError('return 必须是映射（order/speed/acce/tolerance/open_hand/'
+                            'allow_blind_join）')
+        r_order = r.get('order', ['left', 'right'])
+        if not isinstance(r_order, list) or not r_order:
+            raise TaskError(f'return.order 必须是非空列表，当前 {r_order!r}')
+        r_order = [str(x).strip().lower() for x in r_order]
+        if any(x not in ('left', 'right') for x in r_order):
+            raise TaskError(f'return.order 只允许 left/right，当前 {r_order}')
+        if len(set(r_order)) != len(r_order):
+            raise TaskError(f'return.order 有重复：{r_order}')
+        self.return_order = tuple(r_order)
+        try:
+            self.return_speed = float(r.get('speed', 0.2))
+            self.return_acce = float(r.get('acce', 0.2))
+        except (TypeError, ValueError):
+            raise TaskError(f'return.speed/acce 必须是数，当前 '
+                            f'{r.get("speed")!r}/{r.get("acce")!r}')
+        for key, val in (('return.speed', self.return_speed),
+                         ('return.acce', self.return_acce)):
+            if not np.isfinite(val) or not 0 < val <= 0.3:
+                raise TaskError(f'{key}={val} 必须在 (0, 0.3]（首调请用低值）')
+        try:
+            self.return_tolerance = float(r.get('tolerance', 0.10))
+        except (TypeError, ValueError):
+            raise TaskError(f'return.tolerance 必须是数（rad），当前 {r.get("tolerance")!r}')
+        if not np.isfinite(self.return_tolerance) or not 0.0 < self.return_tolerance <= 0.3:
+            raise TaskError(f'return.tolerance={self.return_tolerance} 应在 (0, 0.3] rad')
+        for key, default in (('open_hand', True), ('allow_blind_join', False)):
+            val = r.get(key, default)
+            if not isinstance(val, bool):
+                raise TaskError(f'return.{key} 必须是 true/false，当前 {val!r}')
+            setattr(self, f'return_{key}', val)
+        # 不在 ready 轨迹上时的「安全再接近」几何（镜像 run_one_nut 的抓取前段）
+        try:
+            self.return_table_z = float(r.get('table_z', -0.44))
+            self.return_transit_clearance = float(r.get('transit_clearance', 0.25))
+            self.return_reapproach_step = float(r.get('reapproach_step', 0.025))
+        except (TypeError, ValueError):
+            raise TaskError('return.table_z / transit_clearance / reapproach_step 必须是数')
+        if not -0.8 <= self.return_table_z <= -0.1:
+            raise TaskError(f'return.table_z={self.return_table_z} 应在 [-0.8, -0.1] m')
+        if not 0.05 <= self.return_transit_clearance <= 0.6:
+            raise TaskError(f'return.transit_clearance={self.return_transit_clearance} '
+                            f'应在 [0.05, 0.6] m')
+        if not 0.005 <= self.return_reapproach_step <= 0.1:
+            raise TaskError(f'return.reapproach_step={self.return_reapproach_step} '
+                            f'应在 [0.005, 0.1] m')
+        # 路线 B（关节空间整段插到记录臂型 + 驱动正解校验）
+        try:
+            self.return_joint_step_deg = float(r.get('joint_step_deg', 3.0))
+            self.return_joint_min_clear = float(r.get('joint_min_clear', 0.12))
+            self.return_joint_max_tool_step = float(r.get('joint_max_tool_step', 0.06))
+        except (TypeError, ValueError):
+            raise TaskError('return.joint_step_deg / joint_min_clear / '
+                            'joint_max_tool_step 必须是数')
+        if not 0.5 <= self.return_joint_step_deg <= 15.0:
+            raise TaskError(f'return.joint_step_deg={self.return_joint_step_deg} '
+                            f'应在 [0.5, 15] 度')
+        if not 0.03 <= self.return_joint_min_clear <= 0.30:
+            raise TaskError(f'return.joint_min_clear={self.return_joint_min_clear} '
+                            f'应在 [0.03, 0.30] m')
+        if not 0.01 <= self.return_joint_max_tool_step <= 0.2:
+            raise TaskError(f'return.joint_max_tool_step={self.return_joint_max_tool_step} '
+                            f'应在 [0.01, 0.2] m')
+
         # ---- 手参数 ----
         h = d('hand', {}) or {}
         self.hand_speed = _hand6(h.get('speed', [80] * 6), 'hand.speed')
@@ -570,7 +638,8 @@ class RobotClient:
         self.ns = namespace
         self.arm = arm
         base = f'{namespace}/{arm}_arm'
-        from lbot_arm_interfaces.srv import MoveJP, MoveL, MoveJ, SetEnable, InverseKinematics
+        from lbot_arm_interfaces.srv import (MoveJP, MoveL, MoveJ, SetEnable,
+                                             InverseKinematics, ForwardKinematics)
         from sensor_msgs.msg import JointState
         from geometry_msgs.msg import PoseStamped
         from std_msgs.msg import UInt8MultiArray
@@ -580,6 +649,7 @@ class RobotClient:
         self.linear_cli = node.create_client(MoveL, f'{base}/move_linear')
         self.joint_cli = node.create_client(MoveJ, f'{base}/move_joint')
         self.ik_cli = node.create_client(InverseKinematics, f'{base}/inverse_kinematics')
+        self.fk_cli = node.create_client(ForwardKinematics, f'{base}/forward_kinematics')
         self.joints = None
         self.joint_names = None
         self.joints_ts = -1e18
@@ -621,7 +691,8 @@ class RobotClient:
     def wait_services(self, timeout=5.0):
         for tag, cli in (('set_enable', self.enable_cli), ('move_pose', self.move_cli),
                          ('move_linear', self.linear_cli), ('move_joint', self.joint_cli),
-                         ('inverse_kinematics', self.ik_cli)):
+                         ('inverse_kinematics', self.ik_cli),
+                         ('forward_kinematics', self.fk_cli)):
             if not cli.wait_for_service(timeout_sec=timeout):
                 raise TaskError(f'{self.arm}_arm/{tag} 服务不可用，驱动是否启动？')
 
@@ -671,20 +742,40 @@ class RobotClient:
             return 'ok', [float(v) for v in res.joints]
         return 'fail', None
 
-    def ik_solve(self, position, euler_rad, extra_seeds=None):
+    def ik_solve(self, position, euler_rad, extra_seeds=None, prefer_current=True):
         """多种子逆解并把关节角带回来：返回 (joints, 成功种子下标)，全失败 (None, None)。
 
         与 ik_check 同策略（当前关节角 -> 记录段臂型种子）。存在的理由：
         lbot_move_pose 内部自己做 IK 且不接受初值，解落在另一个臂型分支时会失败
         （实测中螺母中转横移：外部用记录臂型种子可解，MoveJP 却被拒）。
         拿到关节角后即可用 MoveJ 执行同一目标。
+
+        prefer_current=False 把调用方给的种子排在当前关节反馈之前。大跨度 MoveJ 后
+        反馈带稳态残差，拿它当首种子会把解拉到另一个臂型分支（实测右臂上柱横移
+        第 12 段解与上一段相差 232deg，被换臂型保护中止）；连续性优先时必须传 False。
         """
-        seeds = [self.joints] + [s for s in (extra_seeds or []) if s is not None]
+        extra = [s for s in (extra_seeds or []) if s is not None]
+        seeds = ([self.joints] + extra) if prefer_current else (extra + [self.joints])
         for idx, seed in enumerate(seeds):
             status, joints = self.ik_try_full(position, euler_rad, seed)
             if status == 'ok' and len(joints or []) == 7:
                 return joints, idx
         return None, None
+
+    def fk_solve(self, joints, timeout=8.0):
+        """正解：把一组 7 关节角换成末端 (xyz, euler_rad)。失败返回 (None, None)。
+
+        用途是给"关节空间整段回退"做安全校验：关节插值的中间位形没有解析式，
+        用驱动正解算出工具到底在哪儿，才能确认整段都在桌面安全面之上。
+        """
+        req = self.fk_cli.srv_type.Request()
+        req.joints = [float(x) for x in joints]
+        res = self._spin_call(self.fk_cli, req, timeout=timeout)
+        if res is None or not bool(res.success):
+            return None, None
+        p = np.array([res.position.x, res.position.y, res.position.z], float)
+        e = np.array([res.euler.x, res.euler.y, res.euler.z], float)
+        return p, e
 
     def ik_check(self, position, euler_rad, extra_seeds=None):
         """可达性预检。驱动数值逆解以 joints 为初始种子，臂型离目标远时会单纯因种子

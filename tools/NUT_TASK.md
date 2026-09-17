@@ -523,9 +523,11 @@ python3 tools/nut_pick_place.py --detector external --order l
 | `tools/nut_detector_example.py` | 自接检测器模板（只出像素的最简示例） |
 | `开发资源/nut_sort/nut_detector_ref.py` | 固定参考位姿桩（base_link 直给，联调用） |
 | `tools/nut_pick_place.py` | 主流程（默认 dry-run） |
-| `tools/test_nut_task.py` | 离线单测（94 项，含 ready 轨迹接入/无 ready 回退、停顿期持续 spin、关节到位补发+分臂容差+逐关节诊断、视觉笛卡尔位姿核对/补发/指令vs实际报错、速度倍率、记录段姿态源、多种子 IK+对照探针、终端输入检测器、同型号多目标 random/first/abort 策略、缺型号整轮重拍（detect_attempts/missing_retry_seconds）、逐颗重识别（redetect_each_nut 配置校验、剩余尺寸子集挑选/判缺/重试、回 ready 只 MoveJ 末点不重放段）、抓后竖直 lift 点（grasp_points 5 元组/按尺寸 lift_height/hover>z_offset 反转拒绝/范围校验）、识别弹窗配置校验、4 段真实任务段加载、共用 place、右 approach 按尺寸分段（l/m/s 选段/校验/交接行）、分臂闭合值、4 种检测结果形式、base 系直给、grasp_offset_xyz 腕部偏移、按尺寸姿态/偏移覆盖与回退、非法值校验） |
-| `tools/test_nut_yolo.py` | 深度/内参/ROI/locate 换算 + 重取帧重试 + annotate 画框 + DetectionWindow 弹窗生命周期/按键/超时/headless 降级（22 项） |
-| `tools/test_nut_yolo_live.py` | 配对取帧纯函数：积压跳帧、过期/失配拒绝、坏深度不掩盖另一检测（3 项） |
+| `tools/test_nut_task.py` | 离线单测（99 项，含 ready 轨迹接入/无 ready 回退、停顿期持续 spin、关节到位补发+分臂容差+逐关节诊断、视觉笛卡尔位姿核对/补发/指令vs实际报错、速度倍率、记录段姿态源、多种子 IK+对照探针、终端输入检测器、同型号多目标 random/first/abort 策略、缺型号整轮重拍（detect_attempts/missing_retry_seconds）、逐颗重识别（redetect_each_nut 配置校验、剩余尺寸子集挑选/判缺/重试、回 ready 只 MoveJ 末点不重放段）、抓后竖直 lift 点（grasp_points 5 元组/按尺寸 lift_height/hover>z_offset 反转拒绝/范围校验）、识别弹窗配置校验、4 段真实任务段加载、共用 place、右 approach 按尺寸分段（l/m/s 选段/校验/交接行）、分臂闭合值、4 种检测结果形式、base 系直给、grasp_offset_xyz 腕部偏移、按尺寸姿态/偏移覆盖与回退、非法值校验） |
+| `tools/test_nut_yolo.py` | 深度/内参/ROI/locate 换算 + 重取帧重试 + annotate 画框 + DetectionWindow 弹窗生命周期/按键/超时/headless 降级（24 项） |
+| `tools/test_nut_yolo_live.py` | 配对取帧纯函数：积压跳帧、过期/失配拒绝、坏深度不掩盖另一检测（6 项） |
+| `tools/nut_return.py` | **安全回退/复位**：把 `left/right.ready` 轨迹逆向回放回 ready 段起点（开机安全起始位）；不在 ready 轨迹上（抓取中间态等）时先做「安全再接近」（同高横移，或关节整段 + 驱动正解校验），自动上使能、默认 dry-run（见第 10 节） |
+| `tools/test_nut_return.py` | 回退离线测试：逆向路径/最近点、四种动作判定（already_home/reverse/blind_join/refuse）、return 配置校验、真实 ready 段规划、安全再接近两条路线（IK 预检/二分加密/FK 闸门/双臂型回退）、逐点回放与另一臂漂移中止、全链路编排（44 项） |
 
 ## 8. 安全
 
@@ -538,12 +540,104 @@ python3 tools/nut_pick_place.py --detector external --order l
 - 回放中另一只臂发生漂移立即中止；异常后**不自动掉使能**，在途运动需现场确认。
 - 外参残差约 10.6mm；相机被碰过必须重新标定，每次启动都重读外参 yaml，换文件免操作。
 - 手型值先小力慢速空载验证，确认不夹线缆/盒壁。
+- 抓取失败/中断后**不要直接重跑 `nut_pick_place`**：框架会从当前姿态做无避障 MoveJ 接入
+  ready 起点；先用第 10 节的 `nut_return.py` 退回安全起始位（在 ready 轨迹上就逆向回放；
+  抓取中间态等不在轨迹上的姿态，脚本自动走「安全再接近」：先上中转平面，再同高横移或
+  关节整段插值进 ready 末点，全程 IK/FK 预检，任何一点不过就在运动前中止）。
 
 ## 9. 测试
 
 ```bash
 cd tools
 source /opt/ros/jazzy/setup.bash && source ../install/setup.bash
-/usr/bin/python3 -m pytest test_nut_task.py test_nut_yolo.py test_nut_yolo_live.py -q
-# 当前共 119 项（task 94 + yolo 22 + live 3）；只用 unittest 也可逐个文件跑
+/usr/bin/python3 -m pytest test_nut_task.py test_nut_yolo.py test_nut_yolo_live.py \
+    test_nut_return.py -q
+# 当前共 173 项（task 99 + yolo 24 + live 6 + return 44）；只用 unittest 也可逐个文件跑
 ```
+
+## 10. 安全回退与复位（nut_return.py）
+
+抓取失败、任务中断、抓取到一半想收手、或单纯想把双臂从 ready 离场位收回来时用这个脚本。
+目标只有一个：**把每只臂安全送回 ready 段第 0 点**（框架 `join_to_start` 认定的「已在起点」，
+也就是开机安全起始位）。送到之后重跑 `nut_pick_place`，框架判定「已在段起点」直接重放 ready，
+不会拿着桌面上的姿态做无避障盲动。
+
+脚本按当前姿态自动选路线，**两条路线都坚持「全部算完、校验通过才开始运动」**：
+
+| 当前姿态 | 走的路线 |
+|---|---|
+| 在 ready 轨迹上（差 ≤ `return.tolerance`） | **逆向回放**：把 ready 段关节角倒序逐点 MoveJ 回 pt0 |
+| 已在安全起始位 | 该臂**一步都不动**（连使能都不发），脚本可反复执行 |
+| 不在 ready 轨迹上（抓取中间态、停在任务回位点…） | **安全再接近**：先把臂送回 ready 末点，再整段逆向回 ready 起点 |
+
+### 安全再接近（不在 ready 轨迹上时）
+
+以「抓取中间态」为例：臂正悬在桌面中央、或者停在任务段的回位点，此时绝不能直接 MoveJ
+去接 ready 末点（无避障、会扫桌面）。再接近 = `nut_pick_place` 抓取前段的镜像，有两条路线：
+
+- **路线 A（首选，同高横移）**：竖直上到中转平面 → 同高横移到 ready 末点正上方 → 竖直进 ready 末点。
+  中转平面 = 桌面 + `transit_clearance`（默认 250mm），与主业务抓取用的是同一个高度；
+  全程「外部 IK 分段 + MoveJ」，每点多种子逆解（上一段解优先，保证臂型连续）；
+  若某点落进逆解奇异窄带，会在该点前**二分加密**（最细 1/32 步长）确认能穿过去才继续。
+  横移/下降段再用**驱动正解**复核一遍工具轨迹（见下）。
+- **路线 B（A 不可行时自动启用）**：竖直上到中转平面后，**关节空间整段插值**到 ready 末点的
+  **记录臂型**（每步单关节 ≤ `joint_step_deg`），再用驱动正解逐点校验。
+  为什么需要它：实测右臂从中央抓取位直线横移回退时，中途会撞上逆解奇异区
+  （某点不收敛，越过它又跳到相差 234° 的另一臂型）—— 直线走不通。关节插值逐关节单调、
+  必然落在录制的那一支臂型上、不会有换臂型；代价是中间位形没有解析式，所以用正解兜底。
+
+**正解（FK）校验**是路线 A 后段和路线 B 全程的安全闸门：用 `/…/forward_kinematics` 把每个
+中间关节位形换成工具实际位置，要求
+① 工具始终高于「桌面 + `joint_min_clear`」；② 水平半径 ≤ 800mm；
+③ 相邻中间位形的工具位移 ≤ `joint_max_tool_step`（超了说明是近奇异位形，一步窜很远）。
+任何一条不满足 → 在**运动前**中止，臂一行都不动。竖直上升段本身是逐个 25mm 的直线，扫掠天然有界。
+
+两条路线都不行（IK 不可达 / FK 校验不过）时脚本报错退出，**一行都不动**，
+提示人工把该臂摆到 ready 轨迹附近再跑。
+
+### 用法
+
+```bash
+cd /home/ran/lbot_ws
+source /opt/ros/jazzy/setup.zsh && source install/setup.zsh
+/usr/bin/python3 tools/nut_return.py                       # dry-run：打印路线/关节差/IK+FK 预检
+/usr/bin/python3 tools/nut_return.py --execute             # 真机回退（左先右后）
+/usr/bin/python3 tools/nut_return.py --execute --arm left  # 只回一只臂
+/usr/bin/python3 tools/nut_return.py --execute --speed 0.5 # 再降一半速度
+```
+
+真机执行顺序：读反馈并打印计划（含 IK/FK 预检）→ 自动上使能（**跑完保持使能，不自动掉使能**，
+避免臂失去支撑）→ 按 `return.open_hand` 张开双手（松开可能夹着的螺母，同 ready 录制时的手型）
+→ 单臂依次执行「安全再接近（如需）→ 逆向回放」。每条臂运动时另一臂必须停住，漂移超
+`motion.other_tolerance` 立即中止防干涉。若所有选中的臂都已在安全位，则连使能都不会发。
+
+**可反复执行**：某臂已在安全起始位（差 ≤ `return.tolerance`）则一步都不发；脚本报
+「已在安全起始位，无需运动」并正常退出。所以重复跑、或回退到一半重跑都不会乱走。
+
+`--blind-join` 是逃生口：不做安全再接近，直接低速 MoveJ 接 ready 末点。没有避障、可能扫到桌面，
+只在确认现场空旷、或再接近因为工具坐标系等问题算不出来时才用。
+
+### 配置（`nut_task.yaml` 的 `return:` 段，不配则用括号内默认值）
+
+| 键 | 默认 | 含义 |
+|---|---|---|
+| `order` | `[left, right]` | 单臂依次回退的顺序 |
+| `speed` / `acce` | 0.2 / 0.2 | 逐点 MoveJ 速度/加速度，范围 (0, 0.3] |
+| `tolerance` | 0.10 | rad：判定「已在轨迹上 / 已在安全位」的最大关节差 |
+| `open_hand` | true | 回退前先张开双手；`--keep-hand` 可临时关掉 |
+| `allow_blind_join` | false | true=默认带 `--blind-join` |
+| `table_z` | -0.44 | 桌面在 base_link 的高度估计（与 `nut_pick_place` 同一常量） |
+| `transit_clearance` | 0.25 | 中转平面 = 桌面 + 该高度 |
+| `reapproach_step` | 0.025 | 再接近插值步长；竖直段用它，横移段用 2 倍 |
+| `joint_step_deg` | 3.0 | 路线 B 关节插值每步最大单关节角（度） |
+| `joint_min_clear` | 0.12 | FK 校验：中间位形工具最低必须高于桌面这么多 |
+| `joint_max_tool_step` | 0.06 | FK 校验：相邻中间位形工具位移上限（超了判近奇异） |
+
+### 限制
+
+- 复现的是**录制时**的几何：逆向段来自 ready 段，再接近用的是 `table_z` 这个估计值和正解算出的
+  工具轨迹，**没有碰撞规划**。桌面布置、夹具、相机、工具坐标系或 ready 段本身改过之后要重新核对
+  （改 ready 姿态就是重录 `left/right.ready`，脚本自动跟着变）。
+- FK 校验只能保证「离桌面够高 + 没有近奇异窜动」，**不能**保证侧面不碰到工装/盒壁/另一只臂。
+  工作区里立了新的高障碍物时，先 dry-run 看路线，必要时用 `--arm` 单臂回退。
+- 脚本只读 ready 段，不碰任务段和手型配置。

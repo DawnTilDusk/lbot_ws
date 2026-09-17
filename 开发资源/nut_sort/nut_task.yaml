@@ -143,6 +143,32 @@ motion:
   pose_ori_tolerance: 0.05 # 末端姿态容差 rad（≈2.9°）
   other_tolerance: 0.05     # 回放中另一只臂漂移上限
 
+# ---- 安全回退 / 复位（tools/nut_return.py）----
+# 把双臂安全送回开机安全起始位（= ready 段第 0 点）。两条路线：
+#   1) 当前姿态在 ready 轨迹上：把 ready 段【逆向】逐点 MoveJ 回放回 pt0；
+#   2) 不在轨迹上（抓取中间态、停在任务回位点等）：先做【安全再接近】——
+#      竖直上中转平面 -> 同高横移到 ready 末点正上方 -> 竖直进 ready 末点，
+#      再逆向 ready 回 pt0。再接近是 nut_pick_place 抓取前段的镜像，全程外部 IK
+#      预检（每点多种子逆解 + 换臂型核对），全部算完才开始运动。
+# 终点 pt0 正是框架 join_to_start 认定的「已在起点」，之后重跑 nut_pick_place 会安全重放 ready。
+return:
+  order: [left, right]     # 单臂依次回退；另一臂必须停住（漂移超 other_tolerance 即中止）
+  speed: 0.2               # 回退逐点 MoveJ 速度 / 加速度（建议 <=0.3，首调再降）
+  acce: 0.2
+  tolerance: 0.10          # rad：判定「已在 ready 轨迹上 / 已在安全位」的最大关节差
+  open_hand: true          # 回退前先张开双手（同 ready 录制时的张手状态，松开可能夹着的螺母）
+  allow_blind_join: false  # true=不做安全再接近，直接低速 MoveJ 接 ready 末点
+                           #（无避障、可能扫到桌面，只在确认现场空旷时用）
+  # 安全再接近的几何（与 nut_pick_place 抓取前段同一套常量）
+  table_z: -0.44           # 桌面在 base_link 的高度估计（m）
+  transit_clearance: 0.25  # 中转平面 = 桌面 + 该高度（m）
+  reapproach_step: 0.025   # 插值步长（m）；竖直段用它，横移段用 2 倍
+  # 路线 B：直线横移撞上逆解奇异区时（实测右臂中央抓取位回退会），退到关节空间整段
+  # 插到 ready 末点【记录臂型】，再用驱动正解逐点校验中间位形离桌面的高度。
+  joint_step_deg: 3.0      # 关节插值每步最大单关节角（度）
+  joint_min_clear: 0.12    # 正解校验：中间位形工具最低必须高于桌面这么多（m）
+  joint_max_tool_step: 0.06  # 正解校验：单个中间位形工具位移上限（m），超了判近奇异
+
 # ---- 灵巧手（6 路：[拇指弯曲,拇指侧摆,食,中,无名,小]，0~255；255=全张 0=全闭）----
 hand:
   speed: [80, 80, 80, 80, 80, 80]

@@ -101,6 +101,27 @@ base_link XYZ → 左臂抓取 → 双臂交接序列`。缺少要求的类别�
 配置位于 [nut_task.yaml](开发资源/nut_sort/nut_task.yaml) 的 `detector` 段，默认仍为 manual，
 用 `--detector yolo` 切换。更换电脑时修改 Conda `python` 路径；更换相机安装后重新核对标定。
 
+### 抓取失败后的安全回退
+
+抓取失败或任务中断后，先沿示教的 ready 轨迹**逆向**退回开机安全起始位，再重跑主业务：
+
+```zsh
+source /opt/ros/jazzy/setup.zsh && source install/setup.zsh
+/usr/bin/python3 tools/nut_return.py            # dry-run：只打印逆向链与关节差
+/usr/bin/python3 tools/nut_return.py --execute  # 真机：自动上使能 + 逆向回放（左先右后）
+```
+
+终点是 `left/right.ready` 段第 0 点，也就是框架开机时接入的那个安全起点，因此重跑
+`nut_pick_place` 会安全重放 ready，而不会从桌面上的姿态无避障盲动。已在安全位则一步不发，
+可反复执行。
+
+**抓取到一半（臂悬在桌面中央、或停在任务段回位点）也能收回来**：这种姿态不在 ready 轨迹上，
+脚本自动走「安全再接近」——竖直上到中转平面，再同高横移到 ready 末点正上方、竖直压入；
+若是直线横移会撞上逆解奇异区，就改走关节空间整段插值到 ready 末点的**记录臂型**，并用驱动
+正解逐点校验工具离桌面的高度。两条路线都是**全部算完、校验通过才开始运动**，任何一点不过就
+在运动前中止（臂一行都不动）。`--blind-join` 是不做再接近、直接低速接入 ready 末点的逃生口
+（无避障，只在现场空旷时用）。详见 [tools/NUT_TASK.md](tools/NUT_TASK.md) 第 10 节。
+
 ### 拍照与标注数据
 
 ```zsh
